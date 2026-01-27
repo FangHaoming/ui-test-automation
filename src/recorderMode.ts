@@ -4,18 +4,17 @@
 
 import 'dotenv/config';
 import { Stagehand } from '@browserbasehq/stagehand';
-import { ActionRecorder, type RecordedAction } from './actionRecorder.js';
-import { NetworkInterceptor, type ApiEndpoint, type NetworkResponse, type NetworkRequest } from './networkInterceptor.js';
-import { parseApiEndpoints, getTestCaseApiMapping } from './excelParser.js';
-import { ensurePlaywrightBrowsersInstalled } from './browserChecker.js';
-import { generateZodSchemaCode } from './zodSchemaGenerator.js';
-import { createOllamaLLMClient } from './ollamaLLMClient.js';
-import { createCustomOpenAIClient } from './customOpenAIClient.js';
+import { ActionRecorder, type RecordedAction } from './actionRecorder';
+import { NetworkInterceptor, type ApiEndpoint, type NetworkResponse, type NetworkRequest } from './networkInterceptor';
+import { parseApiEndpoints, getTestCaseApiMapping } from './excelParser';
+import { ensurePlaywrightBrowsersInstalled } from './browserChecker';
+import { generateZodSchemaCode } from './zodSchemaGenerator';
+import { OllamaProvider } from './client-provider/ollama-provider';
 import chalk from 'chalk';
 import { writeFile } from 'fs/promises';
-import { join } from 'path';
 import ExcelJS from 'exceljs';
-
+import { OpenaiProvider } from './client-provider/openai-provider';
+import { AISdkClient } from './aisdkClient';
 export interface RecorderOptions {
   url?: string;
   excelFile?: string; // 用于读取API endpoint配置
@@ -66,15 +65,18 @@ export class RecorderMode {
       verbose: this.options.debug ? 2 : 0,
       localBrowserLaunchOptions: {
         headless: this.options.headless
-      }
+      },
+      // 不等待 iframe 加载完成，避免被验证码等第三方 iframe 卡住超时
+      domSettleTimeout: 0,
     };
     
     // 如果使用本地LLM，使用AI SDK的Ollama集成
     if (useLocalLLM) {
       try {
-        const ollamaModel = await createOllamaLLMClient();
         // Stagehand v3 支持通过 llmClient 参数传入自定义LLM客户端
-        stagehandConfig.llmClient = ollamaModel;
+        stagehandConfig.llmClient = new AISdkClient({
+          model: OllamaProvider.languageModel(process.env.OLLAMA_MODEL || 'qwen2.5:3b'),
+        });
         console.log(chalk.cyan('✓ 已配置Ollama本地LLM客户端'));
       } catch (error: any) {
         console.error(chalk.red('\n✗ Ollama客户端初始化失败:'));
@@ -104,14 +106,10 @@ export class RecorderMode {
       // 如果只有OpenAI，使用 CustomOpenAIClient（支持代理）
       try {
         const openAIModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-        const openAIClient = createCustomOpenAIClient({
-          modelName: openAIModel,
+        stagehandConfig.llmClient = new AISdkClient({
+          model: OpenaiProvider.languageModel(openAIModel)
         });
-        stagehandConfig.llmClient = openAIClient;
-        console.log(chalk.cyan(`✓ 已配置 OpenAI 模型: ${openAIModel}（使用 CustomOpenAIClient，支持代理）`));
-        if (process.env.PROXY_URL && process.env.DISABLE_PROXY !== 'true') {
-          console.log(chalk.gray(`   代理地址: ${process.env.PROXY_URL}`));
-        }
+        console.log(chalk.cyan(`✓ 已配置 OpenAI 模型: ${openAIModel}（使用 openaiProvider，支持代理）`));
       } catch (error: any) {
         console.error(chalk.red('\n✗ OpenAI客户端初始化失败:'));
         console.error(chalk.red(error.message));

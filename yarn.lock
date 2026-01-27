@@ -105,6 +105,14 @@
     "@ai-sdk/provider" "2.0.1"
     "@ai-sdk/provider-utils" "3.0.20"
 
+"@ai-sdk/openai@^3.0.19":
+  version "3.0.19"
+  resolved "https://registry.npmjs.org/@ai-sdk/openai/-/openai-3.0.19.tgz#c4471a0e667c3404339a645e575e867538bf407e"
+  integrity sha512-qpMGKV6eYfW8IzErk/OppchQwVui3GPc4BEfg/sQGRzR89vf2Sa8qvSavXeZi5w/oUF56d+VtobwSH0FRooFCQ==
+  dependencies:
+    "@ai-sdk/provider" "3.0.5"
+    "@ai-sdk/provider-utils" "4.0.9"
+
 "@ai-sdk/perplexity@^2.0.13":
   version "2.0.23"
   resolved "https://registry.npmjs.org/@ai-sdk/perplexity/-/perplexity-2.0.23.tgz"
@@ -122,7 +130,7 @@
     "@standard-schema/spec" "^1.0.0"
     eventsource-parser "^3.0.6"
 
-"@ai-sdk/provider-utils@4.0.9", "@ai-sdk/provider-utils@^4.0.9":
+"@ai-sdk/provider-utils@4.0.9", "@ai-sdk/provider-utils@^4.0.1", "@ai-sdk/provider-utils@^4.0.9":
   version "4.0.9"
   resolved "https://registry.npmjs.org/@ai-sdk/provider-utils/-/provider-utils-4.0.9.tgz"
   integrity sha512-bB4r6nfhBOpmoS9mePxjRoCy+LnzP3AfhyMGCkGL4Mn9clVNlqEeKj26zEKEtB6yoSVcT1IQ0Zh9fytwMCDnow==
@@ -138,7 +146,7 @@
   dependencies:
     json-schema "^0.4.0"
 
-"@ai-sdk/provider@3.0.5", "@ai-sdk/provider@^3.0.5":
+"@ai-sdk/provider@3.0.5", "@ai-sdk/provider@^3.0.1", "@ai-sdk/provider@^3.0.5":
   version "3.0.5"
   resolved "https://registry.npmjs.org/@ai-sdk/provider/-/provider-3.0.5.tgz"
   integrity sha512-2Xmoq6DBJqmSl80U6V9z5jJSJP7ehaJJQMy2iFUqTay06wdCqTnPVBBQbtEL8RCChenL+q5DC5H5WzU3vV3v8w==
@@ -2208,6 +2216,14 @@ ollama-ai-provider-v2@^1.5.0:
   dependencies:
     "@ai-sdk/provider" "^2.0.0"
     "@ai-sdk/provider-utils" "^3.0.17"
+
+ollama-ai-provider-v2@^3.0.2:
+  version "3.0.2"
+  resolved "https://registry.npmjs.org/ollama-ai-provider-v2/-/ollama-ai-provider-v2-3.0.2.tgz#f37a971529efb68a4b5693746ff77771ac9d50ca"
+  integrity sha512-MCGlAl6ycgJ4lq2r5KestglluAidds7uYhtj2wcxxga6eMbJIvGXXE1fR18WpU+ook2Yur1EbjMJDJD3GMZpgA==
+  dependencies:
+    "@ai-sdk/provider" "^3.0.1"
+    "@ai-sdk/provider-utils" "^4.0.1"
 
 ollama@^0.6.3:
   version "0.6.3"

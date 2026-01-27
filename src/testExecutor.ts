@@ -1,14 +1,14 @@
 import 'dotenv/config';
 import { Stagehand } from '@browserbasehq/stagehand';
-import { z } from 'zod';
-import type { TestCase } from './excelParser.js';
-import { parseApiEndpoints } from './excelParser.js';
-import { NetworkInterceptor, type NetworkRequest } from './networkInterceptor.js';
-import { ensurePlaywrightBrowsersInstalled } from './browserChecker.js';
-import { validateWithZodSchema } from './zodSchemaGenerator.js';
-import { createOllamaLLMClient } from './ollamaLLMClient.js';
-import { createCustomOpenAIClient } from './customOpenAIClient.js';
+import type { TestCase } from './excelParser';
+import { parseApiEndpoints } from './excelParser';
+import { NetworkInterceptor } from './networkInterceptor';
+import { ensurePlaywrightBrowsersInstalled } from './browserChecker';
+import { validateWithZodSchema } from './zodSchemaGenerator';
+import { AISdkClient } from './aisdkClient';
 import chalk from 'chalk';
+import { OpenaiProvider } from './client-provider/openai-provider';
+import { OllamaProvider } from './client-provider/ollama-provider';
 
 /**
  * 测试步骤结果接口
@@ -173,14 +173,17 @@ export class TestExecutor {
       localBrowserLaunchOptions: {
         headless: this.options.headless
       },
+      // 不等待 iframe 加载完成，避免被验证码等第三方 iframe 卡住超时
+      domSettleTimeout: 0,
     };
     
     // 如果使用本地LLM，使用AI SDK的Ollama集成
     if (useLocalLLM) {
       try {
-        const ollamaModel = await createOllamaLLMClient();
         // Stagehand v3 支持通过 llmClient 参数传入自定义LLM客户端
-        stagehandConfig.llmClient = ollamaModel;
+        stagehandConfig.llmClient = new AISdkClient({
+          model: OllamaProvider.languageModel(process.env.OLLAMA_MODEL || 'qwen2.5:3b'),
+        });
         console.log(chalk.cyan('✓ 已配置Ollama本地LLM客户端'));
       } catch (error: any) {
         console.error(chalk.red('\n✗ Ollama客户端初始化失败:'));
@@ -208,18 +211,14 @@ export class TestExecutor {
       stagehandConfig.model = anthropicModel;
       console.log(chalk.cyan(`检测到多个API Key，优先使用 Anthropic 模型: ${anthropicModel}`));
       // 注意：这里不恢复 OPENAI_API_KEY，因为我们已经选择了 Anthropic
-    } else if (hasOpenAI) {
+      } else if (hasOpenAI) {
       // 如果只有OpenAI，使用 CustomOpenAIClient（支持代理）
       try {
         const openAIModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-        const openAIClient = createCustomOpenAIClient({
-          modelName: openAIModel,
+        stagehandConfig.llmClient = new AISdkClient({
+          model: OpenaiProvider.languageModel(openAIModel),
         });
-        stagehandConfig.llmClient = openAIClient;
-        console.log(chalk.cyan(`✓ 已配置 OpenAI 模型: ${openAIModel}（使用 CustomOpenAIClient，支持代理）`));
-        if (process.env.PROXY_URL && process.env.DISABLE_PROXY !== 'true') {
-          console.log(chalk.gray(`   代理地址: ${process.env.PROXY_URL}`));
-        }
+        console.log(chalk.cyan(`✓ 已配置 OpenAI 模型: ${openAIModel}（使用 openaiProvider，支持代理）`));
       } catch (error: any) {
         console.error(chalk.red('\n✗ OpenAI客户端初始化失败:'));
         console.error(chalk.red(error.message));
