@@ -1,0 +1,11 @@
+node_modules/
+*.log
+.DS_Store
+reports/
+*.xlsx
+!test-cases-template.xlsx
+.env
+.idea/
+.vscode/
+dist/
+*.tsbuildinfo
