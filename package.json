@@ -1,5 +1,5 @@
 {
-  "name": "ui-test-automation",
+  "name": "ui-auto-test",
   "version": "1.0.0",
   "description": "基于Stagehand的UI自动测试工具，支持Excel测试用例解析",
   "main": "dist/index.js",
@@ -11,7 +11,6 @@
     "test": "tsx src/index.ts",
     "test:local": "tsx src/index.ts --excel test-cases-template.xlsx --headless false",
     "dev": "tsx watch src/index.ts",
-    "llm:server": "node scripts/local-llm-server.js",
     "llm:setup": "bash scripts/setup-ollama.sh",
     "debug": "DEBUG=true tsx src/index.ts --interactive --debug --headless false"
   },

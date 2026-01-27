@@ -33,7 +33,6 @@ export interface CreateChatCompletionOptions {
         image_url?: { url: string };
       }>;
     }>;
-    temperature?: number;
     response_model?: {
       schema: any;
     };
@@ -147,7 +146,6 @@ export class AISdkClient {
           model: this.model,
           messages: formattedMessages,
           schema: options.response_model.schema,
-          temperature: options.temperature,
         });
 
         // 安全地提取对象和 usage 信息
@@ -193,7 +191,6 @@ export class AISdkClient {
               ? 'none'
               : 'auto'
           : undefined,
-      temperature: options.temperature,
     });
 
     // 转换工具调用格式，确保所有字段都是安全的
