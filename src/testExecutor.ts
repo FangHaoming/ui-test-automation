@@ -9,6 +9,7 @@ import { AISdkClient } from './aisdkClient';
 import chalk from 'chalk';
 import { OpenaiProvider } from './client-provider/openai-provider';
 import { OllamaProvider } from './client-provider/ollama-provider';
+import { verifyExpectedResultWithAI } from './aiAssertionEngine';
 
 /**
  * 测试步骤结果接口
@@ -68,6 +69,8 @@ export class TestExecutor {
   protected options: Required<TestExecutorOptions>;
   private results: TestResult[] = [];
   private networkInterceptor: NetworkInterceptor | null = null;
+  // 可选的 AI SDK 客户端，用于生成 Playwright 断言计划
+  private llmClient: AISdkClient | null = null;
 
   constructor(options: TestExecutorOptions = {}) {
     this.options = {
@@ -181,9 +184,10 @@ export class TestExecutor {
     if (useLocalLLM) {
       try {
         // Stagehand v3 支持通过 llmClient 参数传入自定义LLM客户端
-        stagehandConfig.llmClient = new AISdkClient({
+        this.llmClient = new AISdkClient({
           model: OllamaProvider.languageModel(process.env.OLLAMA_MODEL || 'qwen2.5:3b'),
         });
+        stagehandConfig.llmClient = this.llmClient;
         console.log(chalk.cyan('✓ 已配置Ollama本地LLM客户端'));
       } catch (error: any) {
         console.error(chalk.red('\n✗ Ollama客户端初始化失败:'));
@@ -215,9 +219,10 @@ export class TestExecutor {
       // 如果只有OpenAI，使用 CustomOpenAIClient（支持代理）
       try {
         const openAIModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-        stagehandConfig.llmClient = new AISdkClient({
+        this.llmClient = new AISdkClient({
           model: OpenaiProvider.languageModel(openAIModel),
         });
+        stagehandConfig.llmClient = this.llmClient;
         console.log(chalk.cyan(`✓ 已配置 OpenAI 模型: ${openAIModel}（使用 openaiProvider，支持代理）`));
       } catch (error: any) {
         console.error(chalk.red('\n✗ OpenAI客户端初始化失败:'));
@@ -606,7 +611,7 @@ export class TestExecutor {
   /**
    * 验证预期结果
    * @param expectedResult - 预期结果描述
-   * @returns 实际结果
+   * @returns 实际结果（包含 AI 断言日志 + Stagehand 观察）
    */
   async verifyExpectedResult(expectedResult: string): Promise<string> {
     if (!this.stagehand) {
@@ -614,33 +619,24 @@ export class TestExecutor {
     }
     
     try {
-      // 使用observe方法观察页面状态，然后手动提取信息
-      const observations = await this.stagehand.observe(
-        `检查页面是否符合以下预期: ${expectedResult}`
-      );
-      
-      // observe返回Action[]，将其转换为描述字符串
-      const observationText = observations.map(a => a.description).join('; ') || '无法观察结果';
-      
-      // 尝试使用简单的extract获取页面文本
-      try {
-        const pageText = await this.stagehand.extract() as { pageText: string };
-        return observationText + (pageText.pageText ? `\n页面内容: ${pageText.pageText.substring(0, 200)}` : '');
-      } catch {
-        return observationText;
-      }
+      return await verifyExpectedResultWithAI({
+        expectedResult,
+        stagehand: this.stagehand,
+        page: this.page,
+        llmClient: this.llmClient
+      });
     } catch (error: any) {
-      console.warn(`结果验证时出错: ${error.message}`);
-      // 如果提取失败，使用observe的结果
+      const msg = error?.message || String(error);
+      // 如果 AI 断言流程自身失败，退回到简单的 Stagehand.observe 方案，避免整条用例直接崩溃
+      console.warn(`AI 断言流程失败，回退到简单观察模式: ${msg}`);
       try {
         const observations = await this.stagehand.observe(
-          `描述当前页面状态，特别是与以下预期相关的内容: ${expectedResult}`
+          `检查页面是否符合以下预期: ${expectedResult}`
         );
-        // observe返回Action[]，我们需要将其转换为描述字符串
         const observationText = observations.map(a => a.description).join('; ') || '验证失败';
-        return observationText;
+        return `AI 断言失败: ${msg}\n回退观察结果: ${observationText}`;
       } catch (e: any) {
-        return '验证失败: ' + e.message;
+        return '验证失败: ' + (e?.message || String(e));
       }
     }
   }
