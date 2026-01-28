@@ -307,6 +307,33 @@ export class TestExecutor {
   }
 
   /**
+   * act 后若检测到页面 URL 发生变化，则等待页面加载完成后再继续下一步。
+   * 避免在跳转尚未完成时执行下一步导致仍在旧页面上操作。
+   */
+  private async waitForPageLoadIfUrlChanged(urlBeforeAct: string): Promise<void> {
+    if (!this.page) {
+      console.log(chalk.gray(`    [调试] waitForPageLoadIfUrlChanged: page 为空，跳过`));
+      return;
+    }
+    console.log(chalk.gray(`    [调试] act 前 URL: ${urlBeforeAct}`));
+    // 先等待页面加载完成，再判断 URL 是否变化
+    console.log(chalk.gray(`    [调试] 等待页面加载完成...`));
+    try {
+      await this.page.waitForLoadState('networkidle');
+    } catch (_e) {
+      console.log(chalk.yellow(`    [等待加载] 等待 networkidle 超时，继续执行`));
+    }
+    const urlAfterLoad = this.page.url();
+    console.log(chalk.gray(`    [调试] 加载完成后的 URL: ${urlAfterLoad}`));
+    if (urlAfterLoad === urlBeforeAct) {
+      console.log(chalk.gray(`    [调试] URL 未变化，不等待`));
+      return;
+    }
+    console.log(chalk.green(`    [已等待] 页面 URL 已变化，加载完成`));
+    await this.page.waitForTimeout(500);
+  }
+
+  /**
    * 执行单个测试用例
    * @param testCase - 测试用例对象
    * @returns 测试结果
@@ -397,6 +424,7 @@ export class TestExecutor {
           
           // 执行操作并记录开始时间
           const actStartTime = Date.now();
+          const urlBeforeAct = this.page?.url() ?? '';
           console.log(chalk.blue(`    [开始执行] ${step}`));
           
           // 执行 act 方法，尝试获取返回值
@@ -448,8 +476,10 @@ export class TestExecutor {
           const actDuration = Date.now() - actStartTime;
           console.log(chalk.green(`    [执行完成] 耗时: ${actDuration}ms`));
           
+          // act 后若 URL 发生变化，则等待页面加载完成再执行下一步
+          await this.waitForPageLoadIfUrlChanged(urlBeforeAct);
+          
           stepResult.status = 'passed';
-          await this.page.waitForTimeout(500); // 步骤间等待
         } catch (error: any) {
           stepResult.status = 'failed';
           

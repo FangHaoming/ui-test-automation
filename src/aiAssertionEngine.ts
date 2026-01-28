@@ -4,6 +4,21 @@ import type { AISdkClient } from './aisdkClient';
 const DEFAULT_TIMEOUT_MS = 10000;
 
 /**
+ * 获取“包含某文本”的定位器，兼容无 getByText 的 page（如 Stagehand 的 context.pages()[0]）
+ */
+function locatorByText(page: any, text: string, exact?: boolean): any {
+  if (typeof page.getByText === 'function') {
+    return page.getByText(text, { exact: exact ?? false });
+  }
+  if (typeof page.locator !== 'function') {
+    throw new Error('page 上既无 getByText 也无 locator，无法执行文本断言');
+  }
+  const escaped = String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const sel = exact ? `text="${escaped}"` : `:has-text("${escaped}")`;
+  return page.locator(sel).first();
+}
+
+/**
  * AI 生成的断言类型
  */
 export type AssertionType =
@@ -191,13 +206,13 @@ async function runAssertionPlan(
         }
         case 'text_visible': {
           const text = a.text ?? a.expected ?? '';
-          await page.getByText(text, { exact: false }).waitFor({ state: 'visible', timeout });
+          await locatorByText(page, text, false).waitFor({ state: 'visible', timeout });
           logs.push(`  ✓ 文本可见: ${text}`);
           break;
         }
         case 'text_not_visible': {
           const text = a.text ?? a.expected ?? '';
-          await page.getByText(text, { exact: false }).waitFor({ state: 'hidden', timeout });
+          await locatorByText(page, text, false).waitFor({ state: 'hidden', timeout });
           logs.push(`  ✓ 文本不可见: ${text}`);
           break;
         }
