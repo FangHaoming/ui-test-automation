@@ -10,4 +10,5 @@ traces/
 .vscode/
 dist/
 data/
+excel/
 *.tsbuildinfo

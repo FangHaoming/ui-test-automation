@@ -864,7 +864,7 @@ export class TestExecutor {
         try {
           // 在停止 trace 前，尽量等待页面网络空闲，保证最后一批请求与页面状态被记录下来
           const pwPageForTrace = this.getPwPage();
-          if (pwPageForTrace && typeof pwPageForTrace.waitForLoadState === 'function') {
+          if (pwPageForTrace) {
             try {
               await pwPageForTrace.waitForTimeout(3000);
             } catch (_e) {

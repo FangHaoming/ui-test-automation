@@ -9,7 +9,7 @@
     "start": "tsx src/index.ts",
     "start:compiled": "node dist/index.js",
     "test": "tsx src/index.ts",
-    "test:local": "tsx src/index.ts --excel test-cases-template.xlsx --headless false",
+    "test:local": "tsx src/index.ts --excel excel/test-cases-template.xlsx --headless false",
     "dev": "tsx watch src/index.ts",
     "llm:setup": "bash scripts/setup-ollama.sh",
     "debug": "DEBUG=true tsx src/index.ts --interactive --debug --headless false"
