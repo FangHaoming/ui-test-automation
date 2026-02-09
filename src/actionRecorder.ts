@@ -79,31 +79,7 @@ export class ActionRecorder {
     // 启动轮询来获取记录的操作（这是主要机制）
     this.startPolling();
 
-    // 添加一个测试函数到页面，方便调试
-    try {
-      await this.page.evaluate(() => {
-        // @ts-ignore
-        const win = window as any;
-        win._testActionRecorder = () => {
-          if (!win._recordedActions) {
-            win._recordedActions = [];
-          }
-          win._recordedActions.push({
-            timestamp: Date.now(),
-            type: 'click',
-            description: '测试操作',
-            element: { tag: 'TEST' }
-          });
-          // @ts-ignore
-          console.log('[测试] 已添加测试操作到 _recordedActions，当前数量:', win._recordedActions.length);
-          return win._recordedActions.length;
-        };
-      });
-      console.log('[记录器] 操作记录已启动');
-      console.log('[记录器] 提示: 在浏览器控制台运行 window._testActionRecorder() 可以测试记录功能');
-    } catch (error) {
-      console.log('[记录器] 操作记录已启动（测试函数注入失败，但不影响功能）');
-    }
+    console.log('[记录器] 操作记录已启动');
   }
 
   /**
@@ -145,11 +121,6 @@ export class ActionRecorder {
         // @ts-ignore
         const win = window as any;
         
-        // 初始化数组（确保存在）
-        if (!win._recordedActions) {
-          win._recordedActions = [];
-        }
-        
         // 清除旧的监听器（如果存在）
         if (win._actionRecorderListeners) {
           win._actionRecorderListeners.forEach((listener: any) => {
@@ -165,7 +136,6 @@ export class ActionRecorder {
         if (!win._actionRecorderListeners) {
           win._actionRecorderListeners = [];
         }
-
       // 点击事件
       const clickHandler = (event: Event) => {
         // @ts-ignore
@@ -193,16 +163,16 @@ export class ActionRecorder {
           description += ` ${elementInfo.tag}元素`;
         }
 
-        if (!win._recordedActions) {
-          win._recordedActions = [];
-        }
         const action = {
           timestamp: Date.now(),
           type: 'click',
           description,
           element: elementInfo
         };
-        win._recordedActions.push(action);
+        if (!win._uiRecordedActions) {
+          win._uiRecordedActions = [];
+        }
+        win._uiRecordedActions.push(action);
         // 调试：在控制台输出（仅在开发时有用）
         if (win.console && win.console.log) {
           win.console.log('[操作记录]', description);
@@ -240,9 +210,6 @@ export class ActionRecorder {
           }
           description += `输入 "${value}"`;
 
-          if (!win._recordedActions) {
-            win._recordedActions = [];
-          }
           const action = {
             timestamp: Date.now(),
             type: 'type',
@@ -250,7 +217,10 @@ export class ActionRecorder {
             element: elementInfo,
             value
           };
-          win._recordedActions.push(action);
+          if (!win._uiRecordedActions) {
+            win._uiRecordedActions = [];
+          }
+          win._uiRecordedActions.push(action);
           // 调试：在控制台输出
           if (win.console && win.console.log) {
             win.console.log('[操作记录]', description);
@@ -285,9 +255,6 @@ export class ActionRecorder {
           }
           description += `中的选项 "${text}"`;
 
-          if (!win._recordedActions) {
-            win._recordedActions = [];
-          }
           const action = {
             timestamp: Date.now(),
             type: 'select',
@@ -295,7 +262,10 @@ export class ActionRecorder {
             element: elementInfo,
             value: text
           };
-          win._recordedActions.push(action);
+          if (!win._uiRecordedActions) {
+            win._uiRecordedActions = [];
+          }
+          win._uiRecordedActions.push(action);
           // 调试：在控制台输出
           if (win.console && win.console.log) {
             win.console.log('[操作记录]', description);
@@ -314,9 +284,8 @@ export class ActionRecorder {
         return {
           hasListeners: !!win._actionRecorderListeners && win._actionRecorderListeners.length > 0,
           listenerCount: win._actionRecorderListeners?.length || 0,
-          hasRecordedActions: !!win._recordedActions
         };
-      }).catch(() => ({ hasListeners: false, listenerCount: 0, hasRecordedActions: false }));
+      }).catch(() => ({ hasListeners: false, listenerCount: 0 }));
       
       if (verifyResult.hasListeners) {
         console.log(`[记录器] 事件监听器注入成功 (${verifyResult.listenerCount} 个监听器)`);
@@ -404,23 +373,14 @@ export class ActionRecorder {
       }
 
       try {
-        // 先确保页面中的数组已初始化
-        await this.page.evaluate(() => {
-          // @ts-ignore
-          const win = window as any;
-          if (!win._recordedActions) {
-            win._recordedActions = [];
-          }
-        }).catch(() => {});
-
         const actions = await this.page.evaluate(() => {
           // @ts-ignore
           const win = window as any;
-          if (!win._recordedActions || win._recordedActions.length === 0) {
+          if (!win._uiRecordedActions || win._uiRecordedActions.length === 0) {
             return [];
           }
-          const actions = [...win._recordedActions];
-          win._recordedActions = [];
+          const actions = [...win._uiRecordedActions];
+          win._uiRecordedActions = [];
           return actions;
         }) as RecordedAction[];
 
@@ -500,11 +460,11 @@ export class ActionRecorder {
         const actions = await this.page.evaluate(() => {
           // @ts-ignore
           const win = window as any;
-          if (!win._recordedActions || win._recordedActions.length === 0) {
+          if (!win._uiRecordedActions || win._uiRecordedActions.length === 0) {
             return [];
           }
-          const actions = [...win._recordedActions];
-          win._recordedActions = [];
+          const actions = [...win._uiRecordedActions];
+          win._uiRecordedActions = [];
           return actions;
         }) as RecordedAction[];
 

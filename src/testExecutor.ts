@@ -384,12 +384,12 @@ export class TestExecutor {
   /**
    * 执行单个测试用例
    * @param testCase - 测试用例对象
-   * @param recordedSteps - 该用例已记录的每步 act 结果，有则直接回放（不调 LLM）
+   * @param historicalSteps - 该用例历史执行中记录的每步 act 结果，有则直接回放（不调 LLM）
    * @returns 测试结果
    */
   async executeTestCase(
     testCase: TestCase,
-    recordedSteps?: ActResultJson[]
+    historicalSteps?: ActResultJson[]
   ): Promise<TestResult> {
     const result: TestResult = {
       id: testCase.id,
@@ -483,22 +483,21 @@ export class TestExecutor {
           
           const actStartTime = Date.now();
           const urlBeforeAct = this.page?.url() ?? '';
-          const stepRecorded = recordedSteps?.[i];
-          const hasRecordedActions = stepRecorded?.actions?.length;
+          const stepHistory = historicalSteps?.[i];
+          const hasRecordedActions = stepHistory?.actions?.length;
           
           if (hasRecordedActions) {
-            // 直接复用已记录的 actions，不调 LLM
-            console.log(chalk.blue(`    [回放] 使用已记录的 ${stepRecorded.actions.length} 个操作`));
-            for (const action of stepRecorded.actions) {
+            // 直接复用历史记录的 actions，不调 LLM
+            console.log(chalk.blue(`    [回放] 使用历史记录的 ${stepHistory.actions.length} 个操作`));
+            for (const action of stepHistory.actions) {
               const actResult = await this.stagehand.act(action);
               if (actResult && typeof actResult === 'object' && actResult.success === false) {
                 const msg = (actResult as { message?: string; error?: string }).error ?? actResult.message;
                 throw new Error(msg || '回放操作失败');
               }
             }
-            // 关键：在回放模式下也要保留 actResult，
-            // 这样下一次执行时 saveTestResults 不会把 steps 覆盖成空数组
-            stepResult.actResult = stepRecorded;
+            // 回放模式下直接复用历史 actResult
+            stepResult.actResult = stepHistory;
           } else {
             // 使用自然语言指令，由 Stagehand/LLM 理解
             console.log(chalk.blue(`    [开始执行] ${step}`));
@@ -536,10 +535,10 @@ export class TestExecutor {
           console.log(chalk.green(`    [执行完成] 耗时: ${actDuration}ms`));
           
           // 根据「当前步骤」的历史记录决定是否等待页面加载：
-          // 若上次执行该步骤时页面等待曾超时（pageLoadWaitTimedOut === true），
+          // 若历史中该步骤的页面等待曾超时（pageLoadWaitTimedOut === true），
           // 则本次该步骤直接跳过等待；否则正常等待。
           const skipWaitForThisStep =
-            !!stepRecorded && (stepRecorded as any).pageLoadWaitTimedOut === true;
+            !!stepHistory && (stepHistory as any).pageLoadWaitTimedOut === true;
 
           if (!skipWaitForThisStep) {
             const waitInfo = await this.waitForPageLoadIfUrlChanged(urlBeforeAct);
@@ -881,13 +880,13 @@ export class TestExecutor {
   /**
    * 执行所有测试用例
    * @param testCases - 测试用例数组
-   * @param options - recordedActions 为 data 中已记录的每步 act 结果，有则直接回放
+   * @param options - stepHistory 为 data 中已记录的每步 act 结果，有则直接回放
    * @returns 测试结果数组
    */
   async executeAll(
     testCases: TestCase[],
     options?: {
-      recordedActions?: Record<string, ActResultJson[]>;
+      stepHistory?: Record<string, ActResultJson[]>;
       /** 每个用例复用的断言计划（来自历史结果） */
       assertionPlans?: Record<string, AssertionPlan>;
     }
@@ -896,23 +895,23 @@ export class TestExecutor {
       await this.init();
     }
 
-    const recordedActions = options?.recordedActions;
+    const stepHistory = options?.stepHistory;
     const assertionPlans = options?.assertionPlans;
-    const withRecorded = testCases.filter(tc => recordedActions?.[tc.id]?.length).length;
-    if (withRecorded > 0) {
-      console.log(chalk.cyan(`\n${withRecorded} 个用例将使用已记录的操作回放（不调 LLM）\n`));
+    const withHistory = testCases.filter(tc => stepHistory?.[tc.id]?.length).length;
+    if (withHistory > 0) {
+      console.log(chalk.cyan(`\n${withHistory} 个用例将使用历史操作回放（不调 LLM）\n`));
     }
     console.log(`\n开始执行 ${testCases.length} 个测试用例...\n`);
     
     for (const testCase of testCases) {
-      const recordedSteps = recordedActions?.[testCase.id];
+      const historicalSteps = stepHistory?.[testCase.id];
       const existingPlan = assertionPlans?.[testCase.id];
       // 将 existingPlan 暂存到 testCase 上，供 executeTestCase 内部读取并传给 verifyExpectedResult
       const testCaseWithPlan: TestCase & { result?: { assertionPlan?: AssertionPlan } } = {
         ...(testCase as any),
         result: existingPlan ? { assertionPlan: existingPlan } : (testCase as any).result
       };
-      await this.executeTestCase(testCaseWithPlan, recordedSteps);
+      await this.executeTestCase(testCaseWithPlan, historicalSteps);
     }
 
     return this.results;

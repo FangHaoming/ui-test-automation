@@ -32,6 +32,8 @@ interface CommandLineOptions {
   apiConfig: string | null;
   interactive: boolean;
   interactiveUrl: string | null;
+  /** 最大并发执行的用例数量（浏览器实例数），<=0 或未设置时表示不限制 */
+  maxConcurrency?: number;
 }
 
 /**
@@ -52,7 +54,8 @@ async function main(): Promise<void> {
     recordOutput: './recorded-actions.json',
     apiConfig: null,
     interactive: false,
-    interactiveUrl: null
+    interactiveUrl: null,
+    maxConcurrency: undefined
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -96,6 +99,17 @@ async function main(): Promise<void> {
         break;
       case '--interactive-url':
         options.interactiveUrl = args[++i];
+        break;
+      case '--max-concurrency':
+        {
+          const raw = args[++i];
+          const parsed = Number(raw);
+          if (!Number.isNaN(parsed) && Number.isFinite(parsed) && parsed > 0) {
+            options.maxConcurrency = Math.floor(parsed);
+          } else {
+            console.warn(chalk.yellow(`⚠️  无效的 --max-concurrency 值 "${raw}"，将忽略该参数（使用默认并发）`));
+          }
+        }
         break;
       case '--help':
       case '-h':
@@ -177,9 +191,9 @@ async function main(): Promise<void> {
       }
     }
 
-    // 从每个 testCase.result.steps 汇总 recordedActions（持久化格式中 steps 即 actResult 数组）
+    // 从每个 testCase.result.steps 汇总历史步骤与断言计划，供回放和断言复用
     const data = await loadDataFile(dataPath);
-    const recordedActions: Record<string, ActResultJson[]> = {};
+    const stepHistory: Record<string, ActResultJson[]> = {};
     const assertionPlans: Record<string, AssertionPlan> = {};
 
     data.testCases.forEach(tc => {
@@ -191,48 +205,76 @@ async function main(): Promise<void> {
         assertionPlans[tc.id] = result.assertionPlan;
       }
 
+      // 记录历史步骤（ActResultJson[]），供下次回放与页面等待策略复用
       const steps = result.steps;
-      if (!steps?.length) return;
-
-      // 新格式：steps 已是 ActResultJson[]
-      const first = steps[0] as { actions?: unknown[]; actResult?: ActResultJson };
-      if (Array.isArray(first?.actions)) {
-        recordedActions[tc.id] = steps as ActResultJson[];
-        return;
+      if (steps?.length) {
+        stepHistory[tc.id] = steps as ActResultJson[];
       }
+    });
 
-      // 旧格式：steps 为 StepResult[]，取 actResult
-      const list = (steps as { actResult?: ActResultJson }[])
-        .map(s => s.actResult)
-        .filter((a): a is ActResultJson => !!a && Array.isArray(a.actions));
-      if (list.length) recordedActions[tc.id] = list;
-    });
-    // 兼容更旧格式：用例下的 recordedActions 或顶层的 recordedActions
-    data.testCases.forEach(tc => {
-      if (recordedActions[tc.id]) return;
-      const legacy = (tc as { recordedActions?: ActResultJson[] }).recordedActions;
-      if (legacy?.length) recordedActions[tc.id] = legacy;
-    });
-    const topLevel = (data as { recordedActions?: Record<string, ActResultJson[]> }).recordedActions;
-    if (Object.keys(recordedActions).length === 0 && topLevel) {
-      Object.assign(recordedActions, topLevel);
+    // 并发执行测试用例：为每个用例创建独立的 TestExecutor / 浏览器实例
+    // 支持通过 --max-concurrency 控制最大并发数；未设置或 <=0 时默认 5
+    const rawMaxConcurrency =
+      typeof options.maxConcurrency === 'number' && options.maxConcurrency > 0
+        ? options.maxConcurrency
+        : 5;
+    const maxConcurrency = Math.min(rawMaxConcurrency, testCases.length);
+
+    const allResults: typeof TestExecutor.prototype['executeAll'] extends (
+      ...args: any[]
+    ) => Promise<infer R>
+      ? R
+      : any = [];
+
+    for (let i = 0; i < testCases.length; i += maxConcurrency) {
+      const batch = testCases.slice(i, i + maxConcurrency);
+      const batchResultsArrays = await Promise.all(
+        batch.map(async testCase => {
+          const executor = new TestExecutor({
+            headless: options.headless,
+            debug: options.debug,
+            apiConfigFile: options.apiConfig || undefined
+          });
+          try {
+            const singleResults = await executor.executeAll(
+              [testCase],
+              {
+                stepHistory: stepHistory[testCase.id]
+                  ? { [testCase.id]: stepHistory[testCase.id] }
+                  : {},
+                assertionPlans: assertionPlans[testCase.id]
+                  ? { [testCase.id]: assertionPlans[testCase.id] }
+                  : {}
+              }
+            );
+            // 关闭对应浏览器实例
+            await executor.close();
+            return singleResults;
+          } catch (e) {
+            // 出错时也尽量关闭浏览器
+            await executor.close();
+            throw e;
+          }
+        })
+      );
+      allResults.push(...batchResultsArrays.flat());
     }
 
-    // 创建测试执行器
-    const executor = new TestExecutor({
-      headless: options.headless,
-      debug: options.debug,
-      apiConfigFile: options.apiConfig || undefined
-    });
+    const results = allResults;
 
-    // 执行测试（传入 recordedActions / assertionPlans）
-    const results = await executor.executeAll(testCases, {
-      recordedActions,
-      assertionPlans
-    });
-    
-    // 获取统计信息
-    const statistics = executor.getStatistics();
+    // 计算整体统计信息（等价于 TestExecutor.getStatistics）
+    const total = results.length;
+    const passed = results.filter(r => r.status === 'passed').length;
+    const failed = results.filter(r => r.status === 'failed').length;
+    const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+    const statistics = {
+      total,
+      passed,
+      failed,
+      passRate: total > 0 ? ((passed / total) * 100).toFixed(2) + '%' : '0%',
+      totalDuration: totalDuration + 'ms',
+      averageDuration: total > 0 ? (totalDuration / total).toFixed(2) + 'ms' : '0ms'
+    };
 
     // 将测试结果写入 data 目录下对应的 JSON
     console.log('\n正在写入测试结果到 JSON...');
@@ -249,9 +291,6 @@ async function main(): Promise<void> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
     const htmlReportPath = join(options.outputDir, `test-report-${timestamp}.html`);
     await ReportGenerator.generateHTMLReport(results, statistics, htmlReportPath);
-
-    // 关闭浏览器
-    await executor.close();
 
     console.log(chalk.green('\n✓ 测试执行完成！\n'));
 
@@ -345,6 +384,7 @@ ${chalk.bold('命令行选项:')}
   --output, -o <目录>       报告输出目录 (默认: ./reports)
   --headless <true|false>   是否无头模式 (默认: true)
   --debug, -d              启用调试模式
+  --max-concurrency <数值>  最大并发用例数/浏览器实例数 (默认: 5)
   --template, -t            创建Excel模板文件
   --record, -r              启动操作记录模式
   --record-url <URL>        记录模式：初始URL（可选）
