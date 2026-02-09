@@ -26,8 +26,6 @@ export interface TestResultJson {
   endTime: string | null;
   /** 总耗时（ms） */
   duration: number;
-  /** 若为 true，表示该用例在历史执行中所有 waitForLoadState 均超时，下次执行时可跳过页面加载等待 */
-  skipPageLoadWait?: boolean;
   /** 本次执行使用的断言计划（由 AI 生成），用于下次复用 */
   assertionPlan?: AssertionPlan;
 }
@@ -262,8 +260,6 @@ export async function saveTestResults(
       startTime: r.startTime instanceof Date ? r.startTime.toISOString() : String(r.startTime),
       endTime: r.endTime instanceof Date ? r.endTime.toISOString() : (r.endTime ? String(r.endTime) : null),
       duration: r.duration,
-      // 仅为兼容历史结构保留 skipPageLoadWait 字段，但不再用于控制行为
-      skipPageLoadWait: prevResult?.skipPageLoadWait ?? r.skipPageLoadWait,
       assertionPlan: r.assertionPlan || prevResult?.assertionPlan
     };
     return { ...tc, result: resultJson };

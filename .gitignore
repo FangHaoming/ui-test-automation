@@ -2,6 +2,7 @@ node_modules/
 *.log
 .DS_Store
 reports/
+traces/
 *.xlsx
 !test-cases-template.xlsx
 .env

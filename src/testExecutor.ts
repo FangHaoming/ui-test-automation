@@ -1,4 +1,7 @@
 import 'dotenv/config';
+import { mkdirSync } from 'fs';
+import { join } from 'path';
+import { chromium, type BrowserContext } from '@playwright/test';
 import { Stagehand } from '@browserbasehq/stagehand';
 import type { TestCase } from './excelParser';
 import { parseApiEndpoints } from './excelParser';
@@ -10,7 +13,7 @@ import chalk from 'chalk';
 import { OpenaiProvider } from './client-provider/openai-provider';
 import { OllamaProvider } from './client-provider/ollama-provider';
 import { verifyExpectedResultWithAI, type AssertionPlan } from './aiAssertionEngine';
-import type { ActResultJson } from './dataStore.js';
+import type { ActResultJson, ActionJson } from './dataStore.js';
 
 /**
  * 测试步骤结果接口
@@ -43,10 +46,10 @@ export interface TestResult {
   startTime: Date;
   endTime: Date | null;
   duration: number;
-  /** 若为 true，表示该用例在历史执行中所有 waitForLoadState 均超时，下次执行时可跳过页面加载等待 */
-  skipPageLoadWait?: boolean;
   /** 断言计划（由 AI 生成），用于下次复用，避免重复走 LLM 规划 */
   assertionPlan?: AssertionPlan;
+  /** Playwright Trace Viewer 记录文件路径，可用 npx playwright show-trace <path> 查看 */
+  tracePath?: string;
 }
 
 /**
@@ -57,6 +60,10 @@ export interface TestExecutorOptions {
   debug?: boolean;
   timeout?: number;
   apiConfigFile?: string; // API配置Excel文件路径
+  /** 是否记录 Playwright Trace（用于调试），默认 true */
+  recordTrace?: boolean;
+  /** Trace 文件输出目录，默认 ./traces */
+  traceDir?: string;
 }
 
 /**
@@ -82,6 +89,9 @@ export class TestExecutor {
   private networkInterceptor: NetworkInterceptor | null = null;
   // 可选的 AI SDK 客户端，用于生成 Playwright 断言计划
   private llmClient: AISdkClient | null = null;
+  /** Playwright 通过 CDP 连接的浏览器实例，用于 Trace Viewer 记录 */
+  private pwBrowser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
+  private pwContext: BrowserContext | null = null;
 
   constructor(options: TestExecutorOptions = {}) {
     this.options = {
@@ -89,6 +99,8 @@ export class TestExecutor {
       debug: options.debug || false,
       timeout: options.timeout || 30000,
       apiConfigFile: options.apiConfigFile || '',
+      recordTrace: options.recordTrace !== false,
+      traceDir: options.traceDir || './traces',
       ...options
     } as Required<TestExecutorOptions>;
   }
@@ -255,6 +267,19 @@ export class TestExecutor {
       
       await this.stagehand.init();
       this.page = this.stagehand.context.pages()[0];
+      // 如需 Trace 记录，通过 Playwright CDP 连接到同一浏览器以获取带 tracing API 的 context
+      if (this.options.recordTrace) {
+        try {
+          this.pwBrowser = await chromium.connectOverCDP(this.stagehand.connectURL());
+          const contexts = this.pwBrowser.contexts();
+          this.pwContext = contexts.length > 0 ? contexts[0] : null;
+          if (!this.pwContext) {
+            console.warn(chalk.yellow('   [Trace] 无法获取 Playwright context，Trace 记录将禁用'));
+          }
+        } catch (e: any) {
+          console.warn(chalk.yellow(`   [Trace] Playwright CDP 连接失败: ${e?.message || e}，Trace 记录将禁用`));
+        }
+      }
     } catch (error: any) {
       // 处理初始化错误，特别是 API 认证错误
       const errorMessage = error?.message || String(error || '未知错误');
@@ -324,31 +349,85 @@ export class TestExecutor {
   private async waitForPageLoadIfUrlChanged(
     urlBeforeAct: string
   ): Promise<{ attempted: boolean; timedOut: boolean }> {
-    if (!this.page) {
+    const pageForWait = this.getPwPage() ?? this.page;
+    if (!pageForWait) {
       console.log(chalk.gray(`    [调试] waitForPageLoadIfUrlChanged: page 为空，跳过`));
       return { attempted: false, timedOut: false };
     }
     console.log(chalk.gray(`    [调试] act 前 URL: ${urlBeforeAct}`));
-    // 先等待页面加载完成，再判断 URL 是否变化
     let attempted = false;
     let timedOut = false;
     try {
       console.log(chalk.gray(`    [调试] 等待页面加载完成...`));
       attempted = true;
-      await this.page.waitForLoadState('networkidle');
+      await pageForWait.waitForLoadState('networkidle');
     } catch (_e) {
       console.log(chalk.yellow(`    [等待加载] 等待 networkidle 超时，继续执行`));
       timedOut = true;
     }
-    const urlAfterLoad = this.page.url();
+    const urlAfterLoad = pageForWait.url();
     console.log(chalk.gray(`    [调试] 加载完成后的 URL: ${urlAfterLoad}`));
     if (urlAfterLoad === urlBeforeAct) {
       console.log(chalk.gray(`    [调试] URL 未变化，不等待`));
       return { attempted, timedOut };
     }
     console.log(chalk.green(`    [已等待] 页面 URL 已变化，加载完成`));
-    await this.page.waitForTimeout(500);
+    await pageForWait.waitForTimeout(500);
     return { attempted, timedOut };
+  }
+
+  /**
+   * 获取 Playwright Page（用于 Trace 记录 + 以 Playwright API 执行操作）
+   */
+  private getPwPage(): import('playwright').Page | null {
+    if (!this.pwContext) return null;
+    const pages = this.pwContext.pages();
+    return pages.length > 0 ? pages[0] : null;
+  }
+
+  /**
+   * 使用 Playwright API 执行单条 Action，使 Trace Viewer 的 Actions 面板有记录
+   */
+  private async executeActionWithPlaywright(
+    pwPage: import('playwright').Page,
+    action: ActionJson
+  ): Promise<void> {
+    const loc = pwPage.locator(action.selector).first();
+    const method = (action.method || 'click').toLowerCase();
+    const args = action.arguments || [];
+
+    switch (method) {
+      case 'click':
+        await loc.click();
+        break;
+      case 'fill':
+      case 'input':
+      case 'type':
+        await loc.fill(args[0] ?? '');
+        break;
+      case 'press':
+        await loc.press(args[0] ?? 'Enter');
+        break;
+      case 'check':
+        await loc.check();
+        break;
+      case 'uncheck':
+        await loc.uncheck();
+        break;
+      case 'selectoption':
+      case 'select':
+        await loc.selectOption(args[0] ?? args);
+        break;
+      case 'hover':
+        await loc.hover();
+        break;
+      case 'dblclick':
+      case 'doubleclick':
+        await loc.dblclick();
+        break;
+      default:
+        await loc.click();
+    }
   }
 
   /**
@@ -409,9 +488,23 @@ export class TestExecutor {
     let waitAttempts = 0;
     let waitTimeouts = 0;
 
+    let tracePath: string | undefined;
     try {
       if (!this.stagehand) {
         throw new Error('Stagehand未初始化');
+      }
+      
+      // 启用 Playwright Trace 记录（用于 Trace Viewer 调试，需通过 CDP 获取的 pwContext）
+      if (this.options.recordTrace && this.pwContext) {
+        const traceDir = this.options.traceDir || './traces';
+        mkdirSync(traceDir, { recursive: true });
+        const timestamp = Date.now();
+        tracePath = join(traceDir, `trace-${testCase.id}-${timestamp}.zip`);
+        await this.pwContext.tracing.start({
+          screenshots: true,
+          snapshots: true
+        });
+        console.log(chalk.gray(`   [Trace] 已开始记录: ${tracePath}`));
       }
       
       console.log(`\n开始执行测试用例: ${testCase.name} (${testCase.id})`);
@@ -439,16 +532,16 @@ export class TestExecutor {
         }
         
         console.log(`导航到: ${testCase.url}`);
+        const navPage = this.getPwPage() ?? this.page;
         try {
-          // 使用更灵活的等待策略，增加超时时间
-          await this.page.goto(testCase.url)
+          await navPage.goto(testCase.url);
           console.log(chalk.green('✓ 页面加载完成'));
         } catch (navError: any) {
           // 如果 networkidle 失败，尝试使用 domcontentloaded
           if (navError.message?.includes('timeout') || navError.message?.includes('Navigation timeout')) {
             console.warn(chalk.yellow('⚠️  页面加载超时，尝试使用更宽松的等待策略...'));
             try {
-              await this.page.goto(testCase.url)
+              await navPage.goto(testCase.url);
               console.log(chalk.green('✓ 页面加载完成（使用宽松策略）'));
             } catch (retryError: any) {
               console.error(chalk.red(`✗ 页面加载失败: ${retryError.message}`));
@@ -488,21 +581,63 @@ export class TestExecutor {
           
           if (hasRecordedActions) {
             // 直接复用历史记录的 actions，不调 LLM
-            console.log(chalk.blue(`    [回放] 使用历史记录的 ${stepHistory.actions.length} 个操作`));
-            for (const action of stepHistory.actions) {
-              const actResult = await this.stagehand.act(action);
-              if (actResult && typeof actResult === 'object' && actResult.success === false) {
-                const msg = (actResult as { message?: string; error?: string }).error ?? actResult.message;
-                throw new Error(msg || '回放操作失败');
+            const pwPage = this.getPwPage();
+            if (pwPage) {
+              // 使用 Playwright API 执行，使 Trace Viewer 的 Actions 有记录
+              console.log(chalk.blue(`    [回放] 使用 Playwright 执行历史记录的 ${stepHistory.actions.length} 个操作`));
+              for (const action of stepHistory.actions) {
+                await this.executeActionWithPlaywright(pwPage, action);
+              }
+            } else {
+              // 无 pwPage 时回退到 Stagehand 执行
+              console.log(chalk.blue(`    [回放] 使用历史记录的 ${stepHistory.actions.length} 个操作`));
+              for (const action of stepHistory.actions) {
+                const actResult = await this.stagehand.act(action);
+                if (actResult && typeof actResult === 'object' && actResult.success === false) {
+                  const msg = (actResult as { message?: string; error?: string }).error ?? actResult.message;
+                  throw new Error(msg || '回放操作失败');
+                }
               }
             }
-            // 回放模式下直接复用历史 actResult
             stepResult.actResult = stepHistory;
           } else {
-            // 使用自然语言指令，由 Stagehand/LLM 理解
+            // 首次执行：observe 获取 actions → Playwright 执行，使 Trace 有 Actions 记录
             console.log(chalk.blue(`    [开始执行] ${step}`));
+            const pwPage = this.getPwPage();
             let actResult: any;
-            actResult = await this.stagehand.act(step);
+
+            if (pwPage) {
+              // Plan-then-execute: observe 获取可执行 actions，用 Playwright 执行
+              const observeInstruction = /^(find|查找|定位|get)./i.test(step.trim()) ? step : `find the element to ${step}`;
+              const observedActions = await this.stagehand.observe(observeInstruction);
+              if (observedActions.length > 0) {
+                console.log(chalk.blue(`    [Observe] 找到 ${observedActions.length} 个操作，使用 Playwright 执行`));
+                for (const a of observedActions) {
+                  const actionJson: ActionJson = {
+                    selector: a.selector ?? '',
+                    description: a.description ?? '',
+                    method: a.method ?? 'click',
+                    arguments: Array.isArray(a.arguments) ? a.arguments : []
+                  };
+                  await this.executeActionWithPlaywright(pwPage, actionJson);
+                }
+                actResult = {
+                  success: true,
+                  message: '',
+                  actionDescription: step,
+                  actions: observedActions.map((a: any) => ({
+                    selector: a.selector ?? '',
+                    description: a.description ?? '',
+                    method: a.method ?? 'click',
+                    arguments: Array.isArray(a.arguments) ? a.arguments : []
+                  }))
+                };
+              } else {
+                actResult = await this.stagehand.act(step);
+              }
+            } else {
+              actResult = await this.stagehand.act(step);
+            }
             
             if (actResult) {
               if (Array.isArray(actResult)) {
@@ -688,11 +823,6 @@ export class TestExecutor {
         console.log('✓ 测试通过（无预期结果验证）');
       }
 
-      // 保留原有字段以兼容历史数据（但不再用于控制行为）
-      if (waitAttempts > 0 && waitAttempts === waitTimeouts) {
-        result.skipPageLoadWait = true;
-      }
-
     } catch (error: any) {
       result.status = 'failed';
       
@@ -729,6 +859,17 @@ export class TestExecutor {
     } finally {
       result.endTime = new Date();
       result.duration = result.endTime.getTime() - result.startTime.getTime();
+      // 停止 Trace 记录并保存
+      if (this.options.recordTrace && this.pwContext && tracePath) {
+        try {
+          await this.pwContext.tracing.stop({ path: tracePath });
+          result.tracePath = tracePath;
+          console.log(chalk.gray(`   [Trace] 已保存: ${tracePath}`));
+          console.log(chalk.gray(`   查看: npx playwright show-trace ${tracePath}`));
+        } catch (e: any) {
+          console.warn(chalk.yellow(`   [Trace] 保存失败: ${e?.message || e}`));
+        }
+      }
     }
 
     this.results.push(result);
@@ -938,7 +1079,16 @@ export class TestExecutor {
     if (this.networkInterceptor) {
       this.networkInterceptor.stopIntercepting();
     }
-    
+    // 先关闭 Playwright CDP 连接（仅断开，不杀浏览器进程）
+    if (this.pwBrowser) {
+      try {
+        await this.pwBrowser.close();
+      } catch (_e) {
+        // 忽略关闭时的错误
+      }
+      this.pwBrowser = null;
+      this.pwContext = null;
+    }
     if (this.stagehand) {
       await this.stagehand.close();
       console.log('浏览器已关闭');
