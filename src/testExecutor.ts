@@ -9,7 +9,8 @@ import { AISdkClient } from './aisdkClient';
 import chalk from 'chalk';
 import { OpenaiProvider } from './client-provider/openai-provider';
 import { OllamaProvider } from './client-provider/ollama-provider';
-import { verifyExpectedResultWithAI } from './aiAssertionEngine';
+import { verifyExpectedResultWithAI, type AssertionPlan } from './aiAssertionEngine';
+import type { ActResultJson } from './dataStore.js';
 
 /**
  * 测试步骤结果接口
@@ -19,6 +20,12 @@ export interface StepResult {
   description: string;
   status: 'pending' | 'passed' | 'failed';
   error: string | null;
+  /** 步骤通过时 stagehand.act 的返回值，用于后续直接复用（不调 LLM） */
+  actResult?: ActResultJson;
+  /** 本步操作后是否尝试等待页面加载 */
+  pageLoadWaitAttempted?: boolean;
+  /** 本步操作等待页面加载是否发生超时 */
+  pageLoadWaitTimedOut?: boolean;
 }
 
 /**
@@ -36,6 +43,10 @@ export interface TestResult {
   startTime: Date;
   endTime: Date | null;
   duration: number;
+  /** 若为 true，表示该用例在历史执行中所有 waitForLoadState 均超时，下次执行时可跳过页面加载等待 */
+  skipPageLoadWait?: boolean;
+  /** 断言计划（由 AI 生成），用于下次复用，避免重复走 LLM 规划 */
+  assertionPlan?: AssertionPlan;
 }
 
 /**
@@ -308,37 +319,78 @@ export class TestExecutor {
 
   /**
    * act 后若检测到页面 URL 发生变化，则等待页面加载完成后再继续下一步。
-   * 避免在跳转尚未完成时执行下一步导致仍在旧页面上操作。
+   * 返回本次是否尝试等待以及是否发生超时，用于统计是否应在后续跳过等待。
    */
-  private async waitForPageLoadIfUrlChanged(urlBeforeAct: string): Promise<void> {
+  private async waitForPageLoadIfUrlChanged(
+    urlBeforeAct: string
+  ): Promise<{ attempted: boolean; timedOut: boolean }> {
     if (!this.page) {
       console.log(chalk.gray(`    [调试] waitForPageLoadIfUrlChanged: page 为空，跳过`));
-      return;
+      return { attempted: false, timedOut: false };
     }
     console.log(chalk.gray(`    [调试] act 前 URL: ${urlBeforeAct}`));
     // 先等待页面加载完成，再判断 URL 是否变化
-    console.log(chalk.gray(`    [调试] 等待页面加载完成...`));
+    let attempted = false;
+    let timedOut = false;
     try {
+      console.log(chalk.gray(`    [调试] 等待页面加载完成...`));
+      attempted = true;
       await this.page.waitForLoadState('networkidle');
     } catch (_e) {
       console.log(chalk.yellow(`    [等待加载] 等待 networkidle 超时，继续执行`));
+      timedOut = true;
     }
     const urlAfterLoad = this.page.url();
     console.log(chalk.gray(`    [调试] 加载完成后的 URL: ${urlAfterLoad}`));
     if (urlAfterLoad === urlBeforeAct) {
       console.log(chalk.gray(`    [调试] URL 未变化，不等待`));
-      return;
+      return { attempted, timedOut };
     }
     console.log(chalk.green(`    [已等待] 页面 URL 已变化，加载完成`));
     await this.page.waitForTimeout(500);
+    return { attempted, timedOut };
+  }
+
+  /**
+   * 将 stagehand.act 返回值规范为 ActResultJson（便于存储与回放）
+   */
+  private normalizeActResult(raw: any, stepDescription: string): ActResultJson | undefined {
+    if (!raw) return undefined;
+    let actions: ActResultJson['actions'] = [];
+    if (Array.isArray(raw)) {
+      actions = raw.map((a: any) => ({
+        selector: a?.selector ?? '',
+        description: a?.description ?? '',
+        method: a?.method ?? '',
+        arguments: Array.isArray(a?.arguments) ? a.arguments : []
+      }));
+    } else if (typeof raw === 'object' && Array.isArray(raw.actions)) {
+      actions = raw.actions.map((a: any) => ({
+        selector: a?.selector ?? '',
+        description: a?.description ?? '',
+        method: a?.method ?? '',
+        arguments: Array.isArray(a?.arguments) ? a.arguments : []
+      }));
+    }
+    if (actions.length === 0) return undefined;
+    return {
+      success: raw?.success !== false,
+      message: raw?.message ?? '',
+      actionDescription: raw?.actionDescription ?? stepDescription,
+      actions
+    };
   }
 
   /**
    * 执行单个测试用例
    * @param testCase - 测试用例对象
+   * @param recordedSteps - 该用例已记录的每步 act 结果，有则直接回放（不调 LLM）
    * @returns 测试结果
    */
-  async executeTestCase(testCase: TestCase): Promise<TestResult> {
+  async executeTestCase(
+    testCase: TestCase,
+    recordedSteps?: ActResultJson[]
+  ): Promise<TestResult> {
     const result: TestResult = {
       id: testCase.id,
       name: testCase.name,
@@ -352,6 +404,10 @@ export class TestExecutor {
       endTime: null,
       duration: 0
     };
+
+    // 统计本用例中 waitForLoadState 的尝试与超时次数
+    let waitAttempts = 0;
+    let waitTimeouts = 0;
 
     try {
       if (!this.stagehand) {
@@ -414,26 +470,41 @@ export class TestExecutor {
           error: null
         };
 
+        // 记录本步是否进行了页面加载等待，以及是否超时
+        let stepWaitAttempted = false;
+        let stepWaitTimedOut = false;
+
         try {
           console.log(`  步骤 ${i + 1}: ${step}`);
           
-          // 使用Stagehand的act方法执行自然语言指令
           if (!this.stagehand) {
             throw new Error('Stagehand未初始化');
           }
           
-          // 执行操作并记录开始时间
           const actStartTime = Date.now();
           const urlBeforeAct = this.page?.url() ?? '';
-          console.log(chalk.blue(`    [开始执行] ${step}`));
+          const stepRecorded = recordedSteps?.[i];
+          const hasRecordedActions = stepRecorded?.actions?.length;
           
-          // 执行 act 方法，尝试获取返回值
-          let actResult: any;
-          try {
-            // 直接使用原始指令，让 Stagehand 自己理解
+          if (hasRecordedActions) {
+            // 直接复用已记录的 actions，不调 LLM
+            console.log(chalk.blue(`    [回放] 使用已记录的 ${stepRecorded.actions.length} 个操作`));
+            for (const action of stepRecorded.actions) {
+              const actResult = await this.stagehand.act(action);
+              if (actResult && typeof actResult === 'object' && actResult.success === false) {
+                const msg = (actResult as { message?: string; error?: string }).error ?? actResult.message;
+                throw new Error(msg || '回放操作失败');
+              }
+            }
+            // 关键：在回放模式下也要保留 actResult，
+            // 这样下一次执行时 saveTestResults 不会把 steps 覆盖成空数组
+            stepResult.actResult = stepRecorded;
+          } else {
+            // 使用自然语言指令，由 Stagehand/LLM 理解
+            console.log(chalk.blue(`    [开始执行] ${step}`));
+            let actResult: any;
             actResult = await this.stagehand.act(step);
             
-            // 检查 act 方法的返回值，如果返回失败，抛出错误
             if (actResult) {
               if (Array.isArray(actResult)) {
                 console.log(chalk.green(`    [操作详情] 执行了 ${actResult.length} 个操作:`));
@@ -442,42 +513,51 @@ export class TestExecutor {
                   console.log(chalk.green(`      ${idx + 1}. ${actionDesc}`));
                 });
               } else if (typeof actResult === 'object') {
-                // 检查是否是失败的结果
                 if (actResult.success === false) {
                   const errorMessage = actResult.message || actResult.error || '操作执行失败';
                   const actionDescription = actResult.actionDescription || step;
                   console.error(chalk.red(`    [操作失败] ${errorMessage}`));
-                  
-                  // 提供更详细的诊断信息
                   if (actResult.actions && actResult.actions.length === 0) {
                     console.error(chalk.yellow(`    [诊断] 无法找到可操作的元素`));
-                    console.error(chalk.yellow(`    [建议] 尝试以下方法：`));
-                    console.error(chalk.yellow(`      1. 检查页面是否已完全加载`));
-                    console.error(chalk.yellow(`      2. 检查元素是否存在或被遮挡`));
-                    console.error(chalk.yellow(`      3. 尝试使用更具体的元素描述（如ID、标签文本等）`));
                   }
-                  
                   throw new Error(`Stagehand 操作失败: ${errorMessage} (指令: ${actionDescription})`);
-                } else {
-                  // 成功的情况，打印操作详情
-                  console.log(chalk.green(`    [操作详情] ${JSON.stringify(actResult, null, 2).substring(0, 500)}`));
                 }
+                console.log(chalk.green(`    [操作详情] ${JSON.stringify(actResult, null, 2).substring(0, 500)}`));
               } else {
                 console.log(chalk.green(`    [操作结果] ${String(actResult).substring(0, 200)}`));
               }
             }
-          } catch (actError: any) {
-            const actDuration = Date.now() - actStartTime;
-            console.error(chalk.red(`    [执行失败] 耗时: ${actDuration}ms`));
-            console.error(chalk.red(`    [错误信息] ${actError?.message || String(actError)}`));
-            throw actError;
+            // 记录本步 act 返回值，供后续执行复用
+            const normalized = this.normalizeActResult(actResult, step);
+            if (normalized) stepResult.actResult = normalized;
           }
           
           const actDuration = Date.now() - actStartTime;
           console.log(chalk.green(`    [执行完成] 耗时: ${actDuration}ms`));
           
-          // act 后若 URL 发生变化，则等待页面加载完成再执行下一步
-          await this.waitForPageLoadIfUrlChanged(urlBeforeAct);
+          // 根据「当前步骤」的历史记录决定是否等待页面加载：
+          // 若上次执行该步骤时页面等待曾超时（pageLoadWaitTimedOut === true），
+          // 则本次该步骤直接跳过等待；否则正常等待。
+          const skipWaitForThisStep =
+            !!stepRecorded && (stepRecorded as any).pageLoadWaitTimedOut === true;
+
+          if (!skipWaitForThisStep) {
+            const waitInfo = await this.waitForPageLoadIfUrlChanged(urlBeforeAct);
+            stepWaitAttempted = waitInfo.attempted;
+            stepWaitTimedOut = waitInfo.timedOut;
+            if (waitInfo.attempted) {
+              waitAttempts++;
+              if (waitInfo.timedOut) waitTimeouts++;
+            }
+          } else {
+            // 按步骤级别的历史记录跳过本次等待
+            stepWaitAttempted = false;
+            stepWaitTimedOut = false;
+          }
+
+          // 将本步的页面加载等待信息写入步骤结果
+          stepResult.pageLoadWaitAttempted = stepWaitAttempted;
+          stepResult.pageLoadWaitTimedOut = stepWaitTimedOut;
           
           stepResult.status = 'passed';
         } catch (error: any) {
@@ -575,11 +655,24 @@ export class TestExecutor {
       // 验证预期结果
       if (testCase.expectedResult) {
         console.log(`验证预期结果: ${testCase.expectedResult}`);
-        result.actualResult = await this.verifyExpectedResult(testCase.expectedResult);
+
+        // 若历史结果中已存在断言计划，则复用计划，避免重复调用 LLM
+        const existingPlan =
+          (testCase as any).result?.assertionPlan || (result as any).assertionPlan;
+
+        const { log, plan } = await this.verifyExpectedResult(
+          testCase.expectedResult,
+          existingPlan || undefined
+        );
+        result.actualResult = log;
         
         if (this.checkResultMatch(testCase.expectedResult, result.actualResult)) {
           if (result.status !== 'failed') {
             result.status = 'passed';
+          }
+          // 断言通过时记录断言计划到 result，供下次复用
+          if (plan) {
+            result.assertionPlan = plan;
           }
           console.log('✓ 测试通过');
         } else {
@@ -594,6 +687,11 @@ export class TestExecutor {
           result.actualResult = '所有步骤执行成功';
         }
         console.log('✓ 测试通过（无预期结果验证）');
+      }
+
+      // 保留原有字段以兼容历史数据（但不再用于控制行为）
+      if (waitAttempts > 0 && waitAttempts === waitTimeouts) {
+        result.skipPageLoadWait = true;
       }
 
     } catch (error: any) {
@@ -641,20 +739,26 @@ export class TestExecutor {
   /**
    * 验证预期结果
    * @param expectedResult - 预期结果描述
-   * @returns 实际结果（包含 AI 断言日志 + Stagehand 观察）
+   * @param existingPlan - 复用的断言计划（可选）
+   * @returns { log, plan } - 实际结果日志 + 使用的断言计划
    */
-  async verifyExpectedResult(expectedResult: string): Promise<string> {
+  async verifyExpectedResult(
+    expectedResult: string,
+    existingPlan?: AssertionPlan
+  ): Promise<{ log: string; plan: AssertionPlan | null }> {
     if (!this.stagehand) {
       throw new Error('Stagehand未初始化');
     }
     
     try {
-      return await verifyExpectedResultWithAI({
+      const { log, plan } = await verifyExpectedResultWithAI({
         expectedResult,
         stagehand: this.stagehand,
         page: this.page,
-        llmClient: this.llmClient
+        llmClient: this.llmClient,
+        existingPlan
       });
+      return { log, plan };
     } catch (error: any) {
       const msg = error?.message || String(error);
       // 如果 AI 断言流程自身失败，退回到简单的 Stagehand.observe 方案，避免整条用例直接崩溃
@@ -664,9 +768,11 @@ export class TestExecutor {
           `检查页面是否符合以下预期: ${expectedResult}`
         );
         const observationText = observations.map(a => a.description).join('; ') || '验证失败';
-        return `AI 断言失败: ${msg}\n回退观察结果: ${observationText}`;
+        const log = `AI 断言失败: ${msg}\n回退观察结果: ${observationText}`;
+        return { log, plan: null };
       } catch (e: any) {
-        return '验证失败: ' + (e?.message || String(e));
+        const log = '验证失败: ' + (e?.message || String(e));
+        return { log, plan: null };
       }
     }
   }
@@ -775,17 +881,38 @@ export class TestExecutor {
   /**
    * 执行所有测试用例
    * @param testCases - 测试用例数组
+   * @param options - recordedActions 为 data 中已记录的每步 act 结果，有则直接回放
    * @returns 测试结果数组
    */
-  async executeAll(testCases: TestCase[]): Promise<TestResult[]> {
+  async executeAll(
+    testCases: TestCase[],
+    options?: {
+      recordedActions?: Record<string, ActResultJson[]>;
+      /** 每个用例复用的断言计划（来自历史结果） */
+      assertionPlans?: Record<string, AssertionPlan>;
+    }
+  ): Promise<TestResult[]> {
     if (!this.stagehand) {
       await this.init();
     }
 
+    const recordedActions = options?.recordedActions;
+    const assertionPlans = options?.assertionPlans;
+    const withRecorded = testCases.filter(tc => recordedActions?.[tc.id]?.length).length;
+    if (withRecorded > 0) {
+      console.log(chalk.cyan(`\n${withRecorded} 个用例将使用已记录的操作回放（不调 LLM）\n`));
+    }
     console.log(`\n开始执行 ${testCases.length} 个测试用例...\n`);
     
     for (const testCase of testCases) {
-      await this.executeTestCase(testCase);
+      const recordedSteps = recordedActions?.[testCase.id];
+      const existingPlan = assertionPlans?.[testCase.id];
+      // 将 existingPlan 暂存到 testCase 上，供 executeTestCase 内部读取并传给 verifyExpectedResult
+      const testCaseWithPlan: TestCase & { result?: { assertionPlan?: AssertionPlan } } = {
+        ...(testCase as any),
+        result: existingPlan ? { assertionPlan: existingPlan } : (testCase as any).result
+      };
+      await this.executeTestCase(testCaseWithPlan, recordedSteps);
     }
 
     return this.results;

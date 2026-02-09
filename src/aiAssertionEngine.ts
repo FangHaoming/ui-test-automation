@@ -133,20 +133,27 @@ async function runAssertionPlan(
 
 /**
  * 对外暴露的统一入口：使用 AI + Stagehand.observe 校验预期结果
+ * - 如果提供 existingPlan，则直接复用计划，不再调用 LLM 生成
+ * - 返回日志和实际使用的断言计划，便于持久化到 result 下复用
  */
 export async function verifyExpectedResultWithAI(params: {
   expectedResult: string;
   stagehand: Stagehand;
   page: any;
   llmClient: AISdkClient | null;
-}): Promise<string> {
-  const { expectedResult, stagehand, page, llmClient } = params;
+  existingPlan?: AssertionPlan | null;
+}): Promise<{ log: string; plan: AssertionPlan }> {
+  const { expectedResult, stagehand, page, llmClient, existingPlan } = params;
 
-  // 1. 生成断言计划（URL 用 type:url，其余为 observe 描述）
-  const plan = await planAssertionsWithAI(expectedResult, stagehand, llmClient);
+  // 1. 生成或复用断言计划
+  const plan =
+    existingPlan && existingPlan.assertions?.length
+      ? existingPlan
+      : await planAssertionsWithAI(expectedResult, stagehand, llmClient);
 
   // 2. 执行断言（URL 用 page.url()，其余用 stagehand.observe）
   const assertionLog = await runAssertionPlan(plan, stagehand, page);
 
-  return ['断言执行结果：', assertionLog].join('\n').trim();
+  const log = ['断言执行结果：', assertionLog].join('\n').trim();
+  return { log, plan };
 }

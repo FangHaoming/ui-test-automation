@@ -1,5 +1,13 @@
 import 'dotenv/config';
-import { parseTestCases, createTemplate, createTemplateWithApiConfig, parseApiEndpoints } from './excelParser.js';
+import { createTemplateWithApiConfig, parseApiEndpoints } from './excelParser.js';
+import {
+  loadTestCasesFromExcelAndSave,
+  saveTestResults,
+  loadDataFile,
+  type ActResultJson,
+  type TestResultJson
+} from './dataStore.js';
+import type { AssertionPlan } from './aiAssertionEngine.js';
 import { TestExecutor } from './testExecutor.js';
 import { ReportGenerator } from './reportGenerator.js';
 import { RecorderMode } from './recorderMode.js';
@@ -148,10 +156,10 @@ async function main(): Promise<void> {
     console.log(`\n测试用例文件: ${options.excelFile}`);
     console.log(`输出目录: ${options.outputDir}\n`);
 
-    // 解析Excel文件
-    console.log('正在解析Excel文件...');
-    const testCases = await parseTestCases(options.excelFile);
-    console.log(chalk.green(`✓ 成功解析 ${testCases.length} 个测试用例\n`));
+    // 解析 Excel 并保存为 data 目录下的 JSON
+    console.log('正在解析 Excel 并保存为 JSON...');
+    const { testCases, dataPath } = await loadTestCasesFromExcelAndSave(options.excelFile);
+    console.log(chalk.green(`✓ 成功解析 ${testCases.length} 个测试用例，已保存到 ${dataPath}\n`));
 
     if (testCases.length === 0) {
       console.warn(chalk.yellow('警告: 未找到任何测试用例'));
@@ -169,6 +177,47 @@ async function main(): Promise<void> {
       }
     }
 
+    // 从每个 testCase.result.steps 汇总 recordedActions（持久化格式中 steps 即 actResult 数组）
+    const data = await loadDataFile(dataPath);
+    const recordedActions: Record<string, ActResultJson[]> = {};
+    const assertionPlans: Record<string, AssertionPlan> = {};
+
+    data.testCases.forEach(tc => {
+      const result = tc.result as TestResultJson | undefined;
+      if (!result) return;
+
+      // 记录断言计划（若存在），供下次复用
+      if (result.assertionPlan) {
+        assertionPlans[tc.id] = result.assertionPlan;
+      }
+
+      const steps = result.steps;
+      if (!steps?.length) return;
+
+      // 新格式：steps 已是 ActResultJson[]
+      const first = steps[0] as { actions?: unknown[]; actResult?: ActResultJson };
+      if (Array.isArray(first?.actions)) {
+        recordedActions[tc.id] = steps as ActResultJson[];
+        return;
+      }
+
+      // 旧格式：steps 为 StepResult[]，取 actResult
+      const list = (steps as { actResult?: ActResultJson }[])
+        .map(s => s.actResult)
+        .filter((a): a is ActResultJson => !!a && Array.isArray(a.actions));
+      if (list.length) recordedActions[tc.id] = list;
+    });
+    // 兼容更旧格式：用例下的 recordedActions 或顶层的 recordedActions
+    data.testCases.forEach(tc => {
+      if (recordedActions[tc.id]) return;
+      const legacy = (tc as { recordedActions?: ActResultJson[] }).recordedActions;
+      if (legacy?.length) recordedActions[tc.id] = legacy;
+    });
+    const topLevel = (data as { recordedActions?: Record<string, ActResultJson[]> }).recordedActions;
+    if (Object.keys(recordedActions).length === 0 && topLevel) {
+      Object.assign(recordedActions, topLevel);
+    }
+
     // 创建测试执行器
     const executor = new TestExecutor({
       headless: options.headless,
@@ -176,27 +225,28 @@ async function main(): Promise<void> {
       apiConfigFile: options.apiConfig || undefined
     });
 
-    // 执行测试
-    const results = await executor.executeAll(testCases);
+    // 执行测试（传入 recordedActions / assertionPlans）
+    const results = await executor.executeAll(testCases, {
+      recordedActions,
+      assertionPlans
+    });
     
     // 获取统计信息
     const statistics = executor.getStatistics();
 
+    // 将测试结果写入 data 目录下对应的 JSON
+    console.log('\n正在写入测试结果到 JSON...');
+    await saveTestResults(dataPath, results, statistics);
+    console.log(chalk.green(`✓ 测试结果已写入: ${dataPath}`));
+
     // 生成报告
     console.log('\n正在生成测试报告...');
-    
-    // 控制台报告
     ReportGenerator.printConsoleReport(results, statistics);
 
-    // Excel报告
+    // HTML 报告（仍输出到 output 目录）
     const { mkdir } = await import('fs/promises');
     await mkdir(options.outputDir, { recursive: true });
-    
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-    const excelReportPath = join(options.outputDir, `test-report-${timestamp}.xlsx`);
-    await ReportGenerator.generateExcelReport(results, statistics, excelReportPath);
-
-    // HTML报告
     const htmlReportPath = join(options.outputDir, `test-report-${timestamp}.html`);
     await ReportGenerator.generateHTMLReport(results, statistics, htmlReportPath);
 

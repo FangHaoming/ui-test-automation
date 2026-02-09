@@ -6,13 +6,13 @@ import 'dotenv/config';
 import { Stagehand } from '@browserbasehq/stagehand';
 import { ActionRecorder, type RecordedAction } from './actionRecorder';
 import { NetworkInterceptor, type ApiEndpoint, type NetworkResponse, type NetworkRequest } from './networkInterceptor';
-import { parseApiEndpoints, getTestCaseApiMapping } from './excelParser';
+import { parseApiEndpoints } from './excelParser';
+import { ensureDataFileFromExcel, saveApiRecords } from './dataStore';
 import { ensurePlaywrightBrowsersInstalled } from './browserChecker';
 import { generateZodSchemaCode } from './zodSchemaGenerator';
 import { OllamaProvider } from './client-provider/ollama-provider';
 import chalk from 'chalk';
 import { writeFile } from 'fs/promises';
-import ExcelJS from 'exceljs';
 import { OpenaiProvider } from './client-provider/openai-provider';
 import { AISdkClient } from './aisdkClient';
 export interface RecorderOptions {
@@ -30,6 +30,8 @@ export class RecorderMode {
   private networkInterceptor: NetworkInterceptor | null = null;
   private options: Required<RecorderOptions>;
   private apiEndpoints: ApiEndpoint[] = [];
+  /** 对应 data 目录下的 JSON 路径（当提供了 excelFile 时） */
+  private dataPath: string = '';
 
   constructor(options: RecorderOptions = {}) {
     this.options = {
@@ -182,9 +184,12 @@ export class RecorderMode {
     // 初始化网络拦截器
     this.networkInterceptor = new NetworkInterceptor(this.page);
     
-    // 如果提供了Excel文件，读取API endpoint配置
+    // 如果提供了 Excel 文件：确保 data 目录下有对应 JSON，并读取 API endpoint 配置
     if (this.options.excelFile) {
       try {
+        const { dataPath } = await ensureDataFileFromExcel(this.options.excelFile);
+        this.dataPath = dataPath;
+        console.log(chalk.green(`✓ 数据已同步到: ${dataPath}`));
         this.apiEndpoints = await parseApiEndpoints(this.options.excelFile);
         this.networkInterceptor.setEndpoints(this.apiEndpoints);
         console.log(chalk.green(`✓ 已加载 ${this.apiEndpoints.length} 个API endpoint配置`));
@@ -320,12 +325,18 @@ export class RecorderMode {
       }
     });
     
-    // 如果提供了Excel文件，将请求和响应写入Excel
-    if (this.options.excelFile && (testCaseResponseMap.size > 0 || testCaseRequestMap.size > 0)) {
+    // 如果提供了 Excel 文件，将请求和响应写入 data 目录下对应的 JSON
+    if (this.dataPath && (testCaseResponseMap.size > 0 || testCaseRequestMap.size > 0)) {
       try {
-        await this.writeRequestsAndResponsesToExcel(testCaseRequestMap, testCaseResponseMap);
+        await saveApiRecords(
+          this.dataPath,
+          testCaseRequestMap,
+          testCaseResponseMap,
+          (body) => generateZodSchemaCode(body)
+        );
+        console.log(chalk.green(`✓ API 记录已写入: ${this.dataPath}`));
       } catch (error: any) {
-        console.warn(chalk.yellow(`警告: 无法写入Excel: ${error.message}`));
+        console.warn(chalk.yellow(`警告: 无法写入 JSON: ${error.message}`));
       }
     }
     
@@ -393,102 +404,6 @@ export class RecorderMode {
    */
   getActionDescriptions(): string[] {
     return this.actionRecorder?.getActionDescriptions() || [];
-  }
-
-  /**
-   * 将捕获的请求和响应写入Excel文件
-   * @param testCaseRequestMap - 测试用例ID到API请求映射
-   * @param testCaseResponseMap - 测试用例ID到API响应映射
-   */
-  private async writeRequestsAndResponsesToExcel(
-    testCaseRequestMap: Map<string, Map<string, NetworkRequest>>,
-    testCaseResponseMap: Map<string, Map<string, NetworkResponse>>
-  ): Promise<void> {
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(this.options.excelFile);
-    const worksheet = workbook.worksheets[0];
-    
-    // 获取API URL映射
-    const apiMapping = await getTestCaseApiMapping(this.options.excelFile);
-    
-    // 遍历每一行，查找对应的测试用例
-    for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber++) {
-      const row = worksheet.getRow(rowNumber);
-      const testCaseId = row.getCell(1).value?.toString() || '';
-      
-      if (!testCaseId) continue;
-      
-      // 获取该测试用例配置的API URL列表
-      const apiUrls = apiMapping.get(testCaseId) || [];
-      if (apiUrls.length === 0) continue;
-      
-      const requestMap = testCaseRequestMap.get(testCaseId);
-      const responseMap = testCaseResponseMap.get(testCaseId);
-      
-      // 构建请求数据（多个API的请求，用换行分隔）
-      const requestData: string[] = [];
-      const responseData: string[] = [];
-      
-      apiUrls.forEach(apiUrl => {
-        const request = requestMap?.get(apiUrl);
-        const response = responseMap?.get(apiUrl);
-        
-        // 处理请求数据（生成Zod schema）
-        if (request) {
-          try {
-            // 解析请求体
-            let requestBody: any = {};
-            if (request.postData) {
-              try {
-                requestBody = JSON.parse(request.postData);
-              } catch {
-                requestBody = { raw: request.postData };
-              }
-            }
-            
-            // 生成Zod schema
-            const zodSchema = generateZodSchemaCode(requestBody);
-            requestData.push(`${apiUrl}:\n${zodSchema}`);
-          } catch (error: any) {
-            console.warn(chalk.yellow(`警告: 无法为 ${apiUrl} 生成Zod schema: ${error.message}`));
-            // 如果生成失败，至少记录请求信息
-            requestData.push(`${apiUrl}:\n${JSON.stringify({
-              method: request.method,
-              headers: request.headers,
-              body: request.postData
-            }, null, 2)}`);
-          }
-        }
-        
-        // 处理响应数据
-        if (response) {
-          // 格式化响应数据为JSON字符串
-          const responseJson = JSON.stringify({
-            url: response.url,
-            status: response.status,
-            headers: response.headers,
-            body: response.body
-          }, null, 2);
-          responseData.push(`${apiUrl}:\n${responseJson}`);
-        }
-      });
-      
-      // 写入第8列（API Request列）- Zod校验规则
-      if (requestData.length > 0) {
-        row.getCell(8).value = requestData.join('\n\n---\n\n');
-        console.log(chalk.green(`✓ 已为测试用例 ${testCaseId} 写入 ${requestData.length} 个API请求的Zod校验规则`));
-      }
-      
-      // 写入第9列（API Response列）- 真实响应数据
-      if (responseData.length > 0) {
-        row.getCell(9).value = responseData.join('\n\n---\n\n');
-        console.log(chalk.green(`✓ 已为测试用例 ${testCaseId} 写入 ${responseData.length} 个API响应`));
-      }
-    }
-    
-    // 保存Excel文件
-    await workbook.xlsx.writeFile(this.options.excelFile);
-    console.log(chalk.green(`✓ Excel文件已更新: ${this.options.excelFile}`));
   }
 
   /**
