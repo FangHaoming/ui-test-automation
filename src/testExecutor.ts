@@ -97,7 +97,7 @@ export class TestExecutor {
     this.options = {
       headless: options.headless !== false,
       debug: options.debug || false,
-      timeout: options.timeout || 30000,
+      timeout: options.timeout || 5000,
       apiConfigFile: options.apiConfigFile || '',
       recordTrace: options.recordTrace !== false,
       traceDir: options.traceDir || './traces',
@@ -369,7 +369,7 @@ export class TestExecutor {
     console.log(chalk.gray(`    [调试] 加载完成后的 URL: ${urlAfterLoad}`));
     if (urlAfterLoad === urlBeforeAct) {
       console.log(chalk.gray(`    [调试] URL 未变化，不等待`));
-      return { attempted, timedOut };
+      return { attempted, timedOut: true };
     }
     console.log(chalk.green(`    [已等待] 页面 URL 已变化，加载完成`));
     await pageForWait.waitForTimeout(500);
@@ -862,6 +862,15 @@ export class TestExecutor {
       // 停止 Trace 记录并保存
       if (this.options.recordTrace && this.pwContext && tracePath) {
         try {
+          // 在停止 trace 前，尽量等待页面网络空闲，保证最后一批请求与页面状态被记录下来
+          const pwPageForTrace = this.getPwPage();
+          if (pwPageForTrace && typeof pwPageForTrace.waitForLoadState === 'function') {
+            try {
+              await pwPageForTrace.waitForTimeout(3000);
+            } catch (_e) {
+              // 忽略 trace 停止前的等待错误（例如页面已关闭）
+            }
+          }
           await this.pwContext.tracing.stop({ path: tracePath });
           result.tracePath = tracePath;
           console.log(chalk.gray(`   [Trace] 已保存: ${tracePath}`));
