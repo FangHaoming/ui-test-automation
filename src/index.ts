@@ -4,7 +4,6 @@ import {
   loadTestCasesFromExcelAndSave,
   saveTestResults,
   loadDataFile,
-  ensureDataDir,
   type ActResultJson,
   type TestResultJson
 } from './data/dataStore.js';
@@ -16,6 +15,7 @@ import { InteractiveMode } from './mode/interactiveMode.js';
 import chalk from 'chalk';
 import { join } from 'path';
 import { existsSync } from 'fs';
+import { ensureDir } from './utils/fsUtils.js';
 
 
 /**
@@ -125,8 +125,9 @@ async function main(): Promise<void> {
 
   // 如果只是创建模板
   if (options.createTemplate) {
-    await ensureDataDir();
-    const templatePath = join(process.cwd(), 'data', 'test-cases-template.xlsx');
+    const excelDir = join(process.cwd(), 'excel');
+    await ensureDir(excelDir);
+    const templatePath = join(excelDir, 'test-cases-template.xlsx');
     await createTemplateWithApiConfig(templatePath);
     console.log(chalk.green('\n✓ 模板文件创建成功！'));
     console.log(chalk.cyan('请填写测试用例后使用 --excel 参数运行测试。'));

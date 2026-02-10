@@ -3,8 +3,9 @@
  */
 
 import { join, basename, extname } from 'path';
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
+import { ensureDir } from '../utils/fsUtils.js';
 import { parseTestCases } from './excelParser.js';
 import type { TestCase } from './excelParser.js';
 import type { TestResult, TestStatistics } from '../executor/testExecutor.js';
@@ -98,9 +99,7 @@ export function getDataPath(excelPath: string): string {
  * 确保 data 目录存在
  */
 export async function ensureDataDir(): Promise<string> {
-  const dir = join(process.cwd(), DATA_DIR);
-  await mkdir(dir, { recursive: true });
-  return dir;
+  return ensureDir(join(process.cwd(), DATA_DIR));
 }
 
 function testCaseToJson(tc: TestCase): TestCaseJson {
