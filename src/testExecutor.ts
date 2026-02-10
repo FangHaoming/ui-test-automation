@@ -50,6 +50,8 @@ export interface TestResult {
   assertionPlan?: AssertionPlan;
   /** Playwright Trace Viewer 记录文件路径，可用 npx playwright show-trace <path> 查看 */
   tracePath?: string;
+  /** 测试失败时的执行日志（仅失败时写入，用于持久化到 result） */
+  log?: string;
 }
 
 /**
@@ -95,6 +97,8 @@ export class TestExecutor {
 
   /** 当前执行的测试用例标识，用于并发时区分日志（格式: [用例ID]） */
   private caseLogPrefix = '';
+  /** 当前用例执行过程中的日志行（失败时写入 result.log） */
+  private caseLogBuffer: string[] = [];
 
   constructor(options: TestExecutorOptions = {}) {
     this.options = {
@@ -108,9 +112,16 @@ export class TestExecutor {
     } as Required<TestExecutorOptions>;
   }
 
-  /** 带用例前缀的 log，并发执行时便于区分是哪个用例的输出 */
+  /** 去掉 ANSI 转义码，便于将日志存为纯文本 */
+  private static stripAnsi(text: string): string {
+    return text.replace(/\x1b\[[0-9;]*m/g, '');
+  }
+
+  /** 带用例前缀的 log，并发执行时便于区分是哪个用例的输出；失败时会写入 result.log */
   private log(...args: any[]): void {
     if (this.caseLogPrefix) {
+      const line = [this.caseLogPrefix, ...args].map(a => (typeof a === 'string' ? a : String(a))).join(' ');
+      this.caseLogBuffer.push(TestExecutor.stripAnsi(line));
       console.log(this.caseLogPrefix, ...args);
     } else {
       console.log(...args);
@@ -119,6 +130,8 @@ export class TestExecutor {
 
   private logWarn(...args: any[]): void {
     if (this.caseLogPrefix) {
+      const line = [this.caseLogPrefix, ...args].map(a => (typeof a === 'string' ? a : String(a))).join(' ');
+      this.caseLogBuffer.push(TestExecutor.stripAnsi(line));
       console.warn(this.caseLogPrefix, ...args);
     } else {
       console.warn(...args);
@@ -127,6 +140,8 @@ export class TestExecutor {
 
   private logError(...args: any[]): void {
     if (this.caseLogPrefix) {
+      const line = [this.caseLogPrefix, ...args].map(a => (typeof a === 'string' ? a : String(a))).join(' ');
+      this.caseLogBuffer.push(TestExecutor.stripAnsi(line));
       console.error(this.caseLogPrefix, ...args);
     } else {
       console.error(...args);
@@ -518,6 +533,7 @@ export class TestExecutor {
 
     let tracePath: string | undefined;
     this.caseLogPrefix = `[${testCase.id}]`;
+    this.caseLogBuffer = [];
     try {
       if (!this.stagehand) {
         throw new Error('Stagehand未初始化');
@@ -908,7 +924,11 @@ export class TestExecutor {
           this.logWarn(chalk.yellow(`   [Trace] 保存失败: ${e?.message || e}`));
         }
       }
+      if (result.status === 'failed' && this.caseLogBuffer.length > 0) {
+        result.log = this.caseLogBuffer.join('\n');
+      }
       this.caseLogPrefix = '';
+      this.caseLogBuffer = [];
     }
 
     this.results.push(result);

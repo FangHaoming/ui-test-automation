@@ -281,16 +281,9 @@ async function main(): Promise<void> {
     await saveTestResults(dataPath, results, statistics);
     console.log(chalk.green(`✓ 测试结果已写入: ${dataPath}`));
 
-    // 生成报告
+    // 生成报告（仅控制台）
     console.log('\n正在生成测试报告...');
     ReportGenerator.printConsoleReport(results, statistics);
-
-    // HTML 报告（仍输出到 output 目录）
-    const { mkdir } = await import('fs/promises');
-    await mkdir(options.outputDir, { recursive: true });
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-    const htmlReportPath = join(options.outputDir, `test-report-${timestamp}.html`);
-    await ReportGenerator.generateHTMLReport(results, statistics, htmlReportPath);
 
     console.log(chalk.green('\n✓ 测试执行完成！\n'));
 

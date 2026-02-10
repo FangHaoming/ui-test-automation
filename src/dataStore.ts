@@ -30,6 +30,8 @@ export interface TestResultJson {
   assertionPlan?: AssertionPlan;
   /** Playwright Trace 回放文件路径，可用 npx playwright show-trace <path> 查看 */
   tracePath?: string;
+  /** 测试失败时的执行日志（仅失败时写入） */
+  log?: string;
 }
 
 /** 可 JSON 序列化的测试用例（apiRequestSchemas 为普通对象） */
@@ -263,7 +265,8 @@ export async function saveTestResults(
       endTime: r.endTime instanceof Date ? r.endTime.toISOString() : (r.endTime ? String(r.endTime) : null),
       duration: r.duration,
       assertionPlan: r.assertionPlan || prevResult?.assertionPlan,
-      tracePath: r.tracePath
+      tracePath: r.tracePath,
+      ...(r.log != null && r.log !== '' ? { log: r.log } : {})
     };
     return { ...tc, result: resultJson };
   });
