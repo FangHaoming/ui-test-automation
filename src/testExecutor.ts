@@ -93,6 +93,9 @@ export class TestExecutor {
   private pwBrowser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
   private pwContext: BrowserContext | null = null;
 
+  /** 当前执行的测试用例标识，用于并发时区分日志（格式: [用例ID]） */
+  private caseLogPrefix = '';
+
   constructor(options: TestExecutorOptions = {}) {
     this.options = {
       headless: options.headless !== false,
@@ -103,6 +106,31 @@ export class TestExecutor {
       traceDir: options.traceDir || './traces',
       ...options
     } as Required<TestExecutorOptions>;
+  }
+
+  /** 带用例前缀的 log，并发执行时便于区分是哪个用例的输出 */
+  private log(...args: any[]): void {
+    if (this.caseLogPrefix) {
+      console.log(this.caseLogPrefix, ...args);
+    } else {
+      console.log(...args);
+    }
+  }
+
+  private logWarn(...args: any[]): void {
+    if (this.caseLogPrefix) {
+      console.warn(this.caseLogPrefix, ...args);
+    } else {
+      console.warn(...args);
+    }
+  }
+
+  private logError(...args: any[]): void {
+    if (this.caseLogPrefix) {
+      console.error(this.caseLogPrefix, ...args);
+    } else {
+      console.error(...args);
+    }
   }
 
   /**
@@ -351,27 +379,27 @@ export class TestExecutor {
   ): Promise<{ attempted: boolean; timedOut: boolean }> {
     const pageForWait = this.getPwPage() ?? this.page;
     if (!pageForWait) {
-      console.log(chalk.gray(`    [调试] waitForPageLoadIfUrlChanged: page 为空，跳过`));
+      this.log(chalk.gray(`    [调试] waitForPageLoadIfUrlChanged: page 为空，跳过`));
       return { attempted: false, timedOut: false };
     }
-    console.log(chalk.gray(`    [调试] act 前 URL: ${urlBeforeAct}`));
+    this.log(chalk.gray(`    [调试] act 前 URL: ${urlBeforeAct}`));
     let attempted = false;
     let timedOut = false;
     try {
-      console.log(chalk.gray(`    [调试] 等待页面加载完成...`));
+      this.log(chalk.gray(`    [调试] 等待页面加载完成...`));
       attempted = true;
       await pageForWait.waitForLoadState('networkidle');
     } catch (_e) {
-      console.log(chalk.yellow(`    [等待加载] 等待 networkidle 超时，继续执行`));
+      this.log(chalk.yellow(`    [等待加载] 等待 networkidle 超时，继续执行`));
       timedOut = true;
     }
     const urlAfterLoad = pageForWait.url();
-    console.log(chalk.gray(`    [调试] 加载完成后的 URL: ${urlAfterLoad}`));
+    this.log(chalk.gray(`    [调试] 加载完成后的 URL: ${urlAfterLoad}`));
     if (urlAfterLoad === urlBeforeAct) {
-      console.log(chalk.gray(`    [调试] URL 未变化，不等待`));
+      this.log(chalk.gray(`    [调试] URL 未变化，不等待`));
       return { attempted, timedOut: true };
     }
-    console.log(chalk.green(`    [已等待] 页面 URL 已变化，加载完成`));
+    this.log(chalk.green(`    [已等待] 页面 URL 已变化，加载完成`));
     await pageForWait.waitForTimeout(500);
     return { attempted, timedOut };
   }
@@ -489,6 +517,7 @@ export class TestExecutor {
     let waitTimeouts = 0;
 
     let tracePath: string | undefined;
+    this.caseLogPrefix = `[${testCase.id}]`;
     try {
       if (!this.stagehand) {
         throw new Error('Stagehand未初始化');
@@ -504,10 +533,10 @@ export class TestExecutor {
           screenshots: true,
           snapshots: true
         });
-        console.log(chalk.gray(`   [Trace] 已开始记录: ${tracePath}`));
+        this.log(chalk.gray(`   [Trace] 已开始记录: ${tracePath}`));
       }
       
-      console.log(`\n开始执行测试用例: ${testCase.name} (${testCase.id})`);
+      this.log(`\n开始执行测试用例: ${testCase.name} (${testCase.id})`);
       
       // 导航到测试URL
       if (testCase.url) {
@@ -531,20 +560,20 @@ export class TestExecutor {
           }
         }
         
-        console.log(`导航到: ${testCase.url}`);
+        this.log(`导航到: ${testCase.url}`);
         const navPage = this.getPwPage() ?? this.page;
         try {
           await navPage.goto(testCase.url);
-          console.log(chalk.green('✓ 页面加载完成'));
+          this.log(chalk.green('✓ 页面加载完成'));
         } catch (navError: any) {
           // 如果 networkidle 失败，尝试使用 domcontentloaded
           if (navError.message?.includes('timeout') || navError.message?.includes('Navigation timeout')) {
-            console.warn(chalk.yellow('⚠️  页面加载超时，尝试使用更宽松的等待策略...'));
+            this.logWarn(chalk.yellow('⚠️  页面加载超时，尝试使用更宽松的等待策略...'));
             try {
               await navPage.goto(testCase.url);
-              console.log(chalk.green('✓ 页面加载完成（使用宽松策略）'));
+              this.log(chalk.green('✓ 页面加载完成（使用宽松策略）'));
             } catch (retryError: any) {
-              console.error(chalk.red(`✗ 页面加载失败: ${retryError.message}`));
+              this.logError(chalk.red(`✗ 页面加载失败: ${retryError.message}`));
               throw new Error(`页面导航失败: ${retryError.message}`);
             }
           } else {
@@ -568,7 +597,7 @@ export class TestExecutor {
         let stepWaitTimedOut = false;
 
         try {
-          console.log(`  步骤 ${i + 1}: ${step}`);
+          this.log(`  步骤 ${i + 1}: ${step}`);
           
           if (!this.stagehand) {
             throw new Error('Stagehand未初始化');
@@ -584,13 +613,13 @@ export class TestExecutor {
             const pwPage = this.getPwPage();
             if (pwPage) {
               // 使用 Playwright API 执行，使 Trace Viewer 的 Actions 有记录
-              console.log(chalk.blue(`    [回放] 使用 Playwright 执行历史记录的 ${stepHistory.actions.length} 个操作`));
+              this.log(chalk.blue(`    [回放] 使用 Playwright 执行历史记录的 ${stepHistory.actions.length} 个操作`));
               for (const action of stepHistory.actions) {
                 await this.executeActionWithPlaywright(pwPage, action);
               }
             } else {
               // 无 pwPage 时回退到 Stagehand 执行
-              console.log(chalk.blue(`    [回放] 使用历史记录的 ${stepHistory.actions.length} 个操作`));
+              this.log(chalk.blue(`    [回放] 使用历史记录的 ${stepHistory.actions.length} 个操作`));
               for (const action of stepHistory.actions) {
                 const actResult = await this.stagehand.act(action);
                 if (actResult && typeof actResult === 'object' && actResult.success === false) {
@@ -602,7 +631,7 @@ export class TestExecutor {
             stepResult.actResult = stepHistory;
           } else {
             // 首次执行：observe 获取 actions → Playwright 执行，使 Trace 有 Actions 记录
-            console.log(chalk.blue(`    [开始执行] ${step}`));
+            this.log(chalk.blue(`    [开始执行] ${step}`));
             const pwPage = this.getPwPage();
             let actResult: any;
 
@@ -611,7 +640,7 @@ export class TestExecutor {
               const observeInstruction = /^(find|查找|定位|get)./i.test(step.trim()) ? step : `find the element to ${step}`;
               const observedActions = await this.stagehand.observe(observeInstruction);
               if (observedActions.length > 0) {
-                console.log(chalk.blue(`    [Observe] 找到 ${observedActions.length} 个操作，使用 Playwright 执行`));
+                this.log(chalk.blue(`    [Observe] 找到 ${observedActions.length} 个操作，使用 Playwright 执行`));
                 for (const a of observedActions) {
                   const actionJson: ActionJson = {
                     selector: a.selector ?? '',
@@ -641,24 +670,24 @@ export class TestExecutor {
             
             if (actResult) {
               if (Array.isArray(actResult)) {
-                console.log(chalk.green(`    [操作详情] 执行了 ${actResult.length} 个操作:`));
+                this.log(chalk.green(`    [操作详情] 执行了 ${actResult.length} 个操作:`));
                 actResult.forEach((action: any, idx: number) => {
                   const actionDesc = action?.description || action?.type || JSON.stringify(action);
-                  console.log(chalk.green(`      ${idx + 1}. ${actionDesc}`));
+                  this.log(chalk.green(`      ${idx + 1}. ${actionDesc}`));
                 });
               } else if (typeof actResult === 'object') {
                 if (actResult.success === false) {
                   const errorMessage = actResult.message || actResult.error || '操作执行失败';
                   const actionDescription = actResult.actionDescription || step;
-                  console.error(chalk.red(`    [操作失败] ${errorMessage}`));
+                  this.logError(chalk.red(`    [操作失败] ${errorMessage}`));
                   if (actResult.actions && actResult.actions.length === 0) {
-                    console.error(chalk.yellow(`    [诊断] 无法找到可操作的元素`));
+                    this.logError(chalk.yellow(`    [诊断] 无法找到可操作的元素`));
                   }
                   throw new Error(`Stagehand 操作失败: ${errorMessage} (指令: ${actionDescription})`);
                 }
-                console.log(chalk.green(`    [操作详情] ${JSON.stringify(actResult, null, 2).substring(0, 500)}`));
+                this.log(chalk.green(`    [操作详情] ${JSON.stringify(actResult, null, 2).substring(0, 500)}`));
               } else {
-                console.log(chalk.green(`    [操作结果] ${String(actResult).substring(0, 200)}`));
+                this.log(chalk.green(`    [操作结果] ${String(actResult).substring(0, 200)}`));
               }
             }
             // 记录本步 act 返回值，供后续执行复用
@@ -667,7 +696,7 @@ export class TestExecutor {
           }
           
           const actDuration = Date.now() - actStartTime;
-          console.log(chalk.green(`    [执行完成] 耗时: ${actDuration}ms`));
+          this.log(chalk.green(`    [执行完成] 耗时: ${actDuration}ms`));
           
           // 根据「当前步骤」的历史记录决定是否等待页面加载：
           // 若历史中该步骤的页面等待曾超时（pageLoadWaitTimedOut === true），
@@ -698,17 +727,17 @@ export class TestExecutor {
           stepResult.status = 'failed';
           
           // 详细打印错误信息用于调试
-          console.error(chalk.red('\n=== 详细错误信息 ==='));
-          console.error(chalk.yellow('错误类型:'), typeof error);
-          console.error(chalk.yellow('错误值:'), error);
-          console.error(chalk.yellow('error === undefined:'), error === undefined);
-          console.error(chalk.yellow('error === null:'), error === null);
+          this.logError(chalk.red('\n=== 详细错误信息 ==='));
+          this.logError(chalk.yellow('错误类型:'), typeof error);
+          this.logError(chalk.yellow('错误值:'), error);
+          this.logError(chalk.yellow('error === undefined:'), error === undefined);
+          this.logError(chalk.yellow('error === null:'), error === null);
           
           if (error) {
-            console.error(chalk.yellow('error.constructor:'), error.constructor?.name);
-            console.error(chalk.yellow('error.message:'), error.message);
-            console.error(chalk.yellow('error.stack:'), error.stack);
-            console.error(chalk.yellow('Object.keys(error):'), Object.keys(error || {}));
+            this.logError(chalk.yellow('error.constructor:'), error.constructor?.name);
+            this.logError(chalk.yellow('error.message:'), error.message);
+            this.logError(chalk.yellow('error.stack:'), error.stack);
+            this.logError(chalk.yellow('Object.keys(error):'), Object.keys(error || {}));
           }
           
           // 安全地提取错误信息，确保始终是字符串
@@ -736,33 +765,33 @@ export class TestExecutor {
             }
           }
           
-          console.error(chalk.yellow('提取的 errorMessage:'), errorMessage);
-          console.error(chalk.yellow('提取的 errorString:'), errorString);
-          console.error(chalk.yellow('errorMessage 类型:'), typeof errorMessage);
-          console.error(chalk.yellow('errorString 类型:'), typeof errorString);
+          this.logError(chalk.yellow('提取的 errorMessage:'), errorMessage);
+          this.logError(chalk.yellow('提取的 errorString:'), errorString);
+          this.logError(chalk.yellow('errorMessage 类型:'), typeof errorMessage);
+          this.logError(chalk.yellow('errorString 类型:'), typeof errorString);
           
           // 确保 errorMessage 和 errorString 都是字符串
           const safeErrorMessage = String(errorMessage || '未知错误');
           const safeErrorString = String(errorString || '{}');
           
-          console.error(chalk.yellow('safeErrorMessage:'), safeErrorMessage);
-          console.error(chalk.yellow('safeErrorString:'), safeErrorString);
-          console.error(chalk.red('=== 错误信息结束 ===\n'));
+          this.logError(chalk.yellow('safeErrorMessage:'), safeErrorMessage);
+          this.logError(chalk.yellow('safeErrorString:'), safeErrorString);
+          this.logError(chalk.red('=== 错误信息结束 ===\n'));
           
           // 检查是否是 API 认证错误
           try {
             if (safeErrorMessage.includes('403') || safeErrorString.includes('forbidden') || safeErrorString.includes('Request not allowed')) {
               const detailedError = `API 认证失败 (403): ${safeErrorString}`;
               stepResult.error = detailedError;
-              console.error(chalk.red(`  步骤 ${i + 1} 执行失败: API 认证错误`));
-              console.error(chalk.yellow('  请检查 API Key 是否正确配置和有效'));
-              console.error(chalk.gray(`  详细错误: ${safeErrorString}`));
+              this.logError(chalk.red(`  步骤 ${i + 1} 执行失败: API 认证错误`));
+              this.logError(chalk.yellow('  请检查 API Key 是否正确配置和有效'));
+              this.logError(chalk.gray(`  详细错误: ${safeErrorString}`));
             } else {
               stepResult.error = safeErrorMessage;
-              console.error(`  步骤 ${i + 1} 执行失败: ${safeErrorMessage}`);
+              this.logError(`  步骤 ${i + 1} 执行失败: ${safeErrorMessage}`);
             }
           } catch (e: any) {
-            console.error(chalk.red('处理错误信息时发生异常:'), e);
+            this.logError(chalk.red('处理错误信息时发生异常:'), e);
             stepResult.error = `错误处理异常: ${e?.message || String(e)}`;
           }
           
@@ -774,21 +803,21 @@ export class TestExecutor {
 
       // 验证API请求（如果配置了Zod schema）
       if (testCase.apiRequestSchemas && testCase.apiRequestSchemas.size > 0) {
-        console.log(`验证API请求（使用Zod schema）...`);
+        this.log(`验证API请求（使用Zod schema）...`);
         const apiValidationResult = await this.validateApiRequests(testCase.id, testCase.apiRequestSchemas);
         
         if (!apiValidationResult.success) {
           result.status = 'failed';
           result.error = `API请求验证失败: ${apiValidationResult.error}`;
-          console.log(chalk.red(`✗ API请求验证失败: ${apiValidationResult.error}`));
+          this.log(chalk.red(`✗ API请求验证失败: ${apiValidationResult.error}`));
         } else {
-          console.log(chalk.green(`✓ API请求验证通过`));
+          this.log(chalk.green(`✓ API请求验证通过`));
         }
       }
       
       // 验证预期结果
       if (testCase.expectedResult) {
-        console.log(`验证预期结果: ${testCase.expectedResult}`);
+        this.log(`验证预期结果: ${testCase.expectedResult}`);
 
         // 若历史结果中已存在断言计划，则复用计划，避免重复调用 LLM
         const existingPlan =
@@ -808,11 +837,11 @@ export class TestExecutor {
           if (plan) {
             result.assertionPlan = plan;
           }
-          console.log('✓ 测试通过');
+          this.log('✓ 测试通过');
         } else {
           result.status = 'failed';
           result.error = `预期结果不匹配。预期: ${testCase.expectedResult}, 实际: ${result.actualResult}`;
-          console.log('✗ 测试失败: 预期结果不匹配');
+          this.log('✗ 测试失败: 预期结果不匹配');
         }
       } else {
         // 如果没有预期结果，只要步骤都执行成功且API验证通过就认为通过
@@ -820,24 +849,24 @@ export class TestExecutor {
           result.status = 'passed';
           result.actualResult = '所有步骤执行成功';
         }
-        console.log('✓ 测试通过（无预期结果验证）');
+        this.log('✓ 测试通过（无预期结果验证）');
       }
 
     } catch (error: any) {
       result.status = 'failed';
       
       // 详细打印错误信息
-      console.error(chalk.red('\n=== 测试用例执行失败 - 详细错误信息 ==='));
-      console.error(chalk.yellow('错误类型:'), typeof error);
-      console.error(chalk.yellow('错误值:'), error);
+      this.logError(chalk.red('\n=== 测试用例执行失败 - 详细错误信息 ==='));
+      this.logError(chalk.yellow('错误类型:'), typeof error);
+      this.logError(chalk.yellow('错误值:'), error);
       
       if (error) {
-        console.error(chalk.yellow('error.constructor:'), error.constructor?.name);
-        console.error(chalk.yellow('error.message:'), error?.message);
-        console.error(chalk.yellow('error.stack:'), error?.stack);
+        this.logError(chalk.yellow('error.constructor:'), error.constructor?.name);
+        this.logError(chalk.yellow('error.message:'), error?.message);
+        this.logError(chalk.yellow('error.stack:'), error?.stack);
         if (error.stack) {
-          console.error(chalk.gray('\n完整堆栈:'));
-          console.error(chalk.gray(error.stack));
+          this.logError(chalk.gray('\n完整堆栈:'));
+          this.logError(chalk.gray(error.stack));
         }
       }
       
@@ -854,8 +883,8 @@ export class TestExecutor {
       }
       
       result.error = errorMessage;
-      console.error(chalk.red(`测试用例执行失败: ${errorMessage}`));
-      console.error(chalk.red('=== 错误信息结束 ===\n'));
+      this.logError(chalk.red(`测试用例执行失败: ${errorMessage}`));
+      this.logError(chalk.red('=== 错误信息结束 ===\n'));
     } finally {
       result.endTime = new Date();
       result.duration = result.endTime.getTime() - result.startTime.getTime();
@@ -873,12 +902,13 @@ export class TestExecutor {
           }
           await this.pwContext.tracing.stop({ path: tracePath });
           result.tracePath = tracePath;
-          console.log(chalk.gray(`   [Trace] 已保存: ${tracePath}`));
-          console.log(chalk.gray(`   查看: npx playwright show-trace ${tracePath}`));
+          this.log(chalk.gray(`   [Trace] 已保存: ${tracePath}`));
+          this.log(chalk.gray(`   查看: npx playwright show-trace ${tracePath}`));
         } catch (e: any) {
-          console.warn(chalk.yellow(`   [Trace] 保存失败: ${e?.message || e}`));
+          this.logWarn(chalk.yellow(`   [Trace] 保存失败: ${e?.message || e}`));
         }
       }
+      this.caseLogPrefix = '';
     }
 
     this.results.push(result);
@@ -911,7 +941,7 @@ export class TestExecutor {
     } catch (error: any) {
       const msg = error?.message || String(error);
       // 如果 AI 断言流程自身失败，退回到简单的 Stagehand.observe 方案，避免整条用例直接崩溃
-      console.warn(`AI 断言流程失败，回退到简单观察模式: ${msg}`);
+      this.logWarn(`AI 断言流程失败，回退到简单观察模式: ${msg}`);
       try {
         const observations = await this.stagehand.observe(
           `检查页面是否符合以下预期: ${expectedResult}`
@@ -1048,10 +1078,13 @@ export class TestExecutor {
     const stepHistory = options?.stepHistory;
     const assertionPlans = options?.assertionPlans;
     const withHistory = testCases.filter(tc => stepHistory?.[tc.id]?.length).length;
-    if (withHistory > 0) {
-      console.log(chalk.cyan(`\n${withHistory} 个用例将使用历史操作回放（不调 LLM）\n`));
+    if (testCases.length === 1) {
+      this.caseLogPrefix = `[${testCases[0].id}]`;
     }
-    console.log(`\n开始执行 ${testCases.length} 个测试用例...\n`);
+    if (withHistory > 0) {
+      this.log(chalk.cyan(`\n${withHistory} 个用例将使用历史操作回放（不调 LLM）\n`));
+    }
+    this.log(`\n开始执行 ${testCases.length} 个测试用例...\n`);
     
     for (const testCase of testCases) {
       const historicalSteps = stepHistory?.[testCase.id];
