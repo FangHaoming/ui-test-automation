@@ -543,8 +543,7 @@ export class TestExecutor {
       if (this.options.recordTrace && this.pwContext) {
         const traceDir = this.options.traceDir || './traces';
         mkdirSync(traceDir, { recursive: true });
-        const timestamp = Date.now();
-        tracePath = join(traceDir, `trace-${testCase.id}-${timestamp}.zip`);
+        tracePath = join(traceDir, `trace-${testCase.id}.zip`);
         await this.pwContext.tracing.start({
           screenshots: true,
           snapshots: true
