@@ -1,6 +1,321 @@
 /**
- * 操作记录器 - 自动记录用户在浏览器上的操作，生成自然语言描述
+ * 操作记录器 - 记录用户操作并生成可供 stagehand.act / Playwright 回放用的 ActionJson（selector, method, arguments）
  */
+
+import type { ActionJson } from '../data/dataStore.js';
+
+/** 在浏览器中执行的监听器注入脚本（纯字符串，避免 tsx 序列化时注入 __name 等导致 ReferenceError） */
+const RECORDER_EVALUATE_SCRIPT = `
+(function() {
+  var doc = document;
+  var win = window;
+  if (!win) return false;
+  function getXPath(el) {
+    if (!el || el.nodeType !== 1) return '';
+    if (el.id && typeof document !== 'undefined') {
+      try {
+        var idEsc = String(el.id).replace(/'/g, "''");
+        if (document.evaluate("count(//*[@id='" + idEsc + "'])", document, null, 1, null).numberValue === 1)
+          return "//*[@id='" + idEsc + "']";
+      } catch (e) {}
+    }
+    var parts = [];
+    var current = el;
+    while (current && current.nodeType === 1) {
+      var tag = current.tagName.toLowerCase();
+      var idx = 1;
+      var sib = current.previousSibling;
+      while (sib) {
+        if (sib.nodeType === 1 && sib.tagName && sib.tagName.toLowerCase() === tag) idx++;
+        sib = sib.previousSibling;
+      }
+      parts.unshift(tag + '[' + idx + ']');
+      current = current.parentNode;
+    }
+    return '//' + (parts.length ? parts.join('/') : '*');
+  }
+  function getSelector(el) {
+    var xpath = getXPath(el);
+    return xpath ? 'xpath=' + xpath : '';
+  }
+  if (win._actionRecorderListeners) {
+    win._actionRecorderListeners.forEach(function(l) {
+      try { doc.removeEventListener(l.type, l.handler, true); } catch (e) {}
+    });
+    win._actionRecorderListeners = [];
+  }
+  win._actionRecorderListeners = win._actionRecorderListeners || [];
+  win._uiRecordedActions = win._uiRecordedActions || [];
+  win._inputPending = win._inputPending || {};
+  var INPUT_DEBOUNCE_MS = 600;
+  function clickHandler(ev) {
+    var target = ev.target || ev.srcElement;
+    if (!target) return;
+    var isCheckbox = target.tagName === 'INPUT' && (target.type === 'checkbox' || target.type === 'radio');
+    var method = isCheckbox ? 'check' : 'click';
+    var el = { tag: target.tagName, text: (target.textContent || '').trim().substring(0, 50) || '', id: target.id || '', className: target.className || '', placeholder: target.placeholder || '', label: (target.labels && target.labels[0] ? target.labels[0].textContent.trim() : '') || '' };
+    var desc = isCheckbox ? '勾选' : '点击';
+    if (el.label) desc += ' ' + el.label;
+    else if (el.text) desc += ' "' + el.text.substring(0, 30) + '"';
+    else if (el.placeholder) desc += ' ' + el.placeholder;
+    else if (el.id) desc += ' ID为"' + el.id + '"的元素';
+    else desc += ' ' + el.tag + '元素';
+    var sel = getSelector(target);
+    win._uiRecordedActions.push({ timestamp: Date.now(), type: 'click', description: desc, element: el, selector: sel || undefined, method: method, arguments: [] });
+  }
+  function inputHandler(ev) {
+    var target = ev.target || ev.srcElement;
+    if (!target || (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA')) return;
+    if (target.type === 'checkbox' || target.type === 'radio') return;
+    var sel = getSelector(target) || 'input:' + Date.now();
+    if (win._inputPending[sel]) clearTimeout(win._inputPending[sel].timer);
+    win._inputPending[sel] = {
+      target: target,
+      timer: setTimeout(function() { flushInputPending(sel); }, INPUT_DEBOUNCE_MS)
+    };
+  }
+  function flushInputPending(sel) {
+    var p = win._inputPending[sel];
+    if (!p || !p.target) return;
+    clearTimeout(p.timer);
+    var t = p.target;
+    var el = { tag: t.tagName, placeholder: t.placeholder || '', id: t.id || '', className: t.className || '', label: (t.labels && t.labels[0] ? t.labels[0].textContent.trim() : '') || '', type: t.type || '' };
+    var value = t.value;
+    var desc = '在';
+    if (el.placeholder) desc += '"' + el.placeholder + '"';
+    else if (el.label) desc += '"' + el.label + '"';
+    else if (el.id) desc += 'ID为"' + el.id + '"的输入框';
+    else desc += el.tag + '输入框';
+    desc += '输入 "' + (value || '') + '"';
+    var s = getSelector(t) || sel;
+    win._uiRecordedActions.push({ timestamp: Date.now(), type: 'type', description: desc, element: el, value: value, selector: s, method: 'fill', arguments: [value != null ? String(value) : ''] });
+    delete win._inputPending[sel];
+  }
+  function blurHandler(ev) {
+    var target = ev.target || ev.srcElement;
+    if (!target || (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA')) return;
+    var sel = getSelector(target);
+    if (sel && win._inputPending[sel]) flushInputPending(sel);
+  }
+  function changeHandler(ev) {
+    var target = ev.target || ev.srcElement;
+    if (!target || target.tagName !== 'SELECT') return;
+    var el = { tag: target.tagName, id: target.id || '', className: target.className || '', label: (target.labels && target.labels[0] ? target.labels[0].textContent.trim() : '') || '' };
+    var text = target.options && target.options[target.selectedIndex] ? target.options[target.selectedIndex].text : target.value;
+    var optionValue = (target.options && target.options[target.selectedIndex]) ? target.options[target.selectedIndex].value : target.value;
+    var desc = '选择';
+    if (el.label) desc += ' ' + el.label;
+    else if (el.id) desc += ' ID为"' + el.id + '"的下拉框';
+    else desc += '下拉框';
+    desc += '中的选项 "' + (text || '') + '"';
+    var sel = getSelector(target);
+    win._uiRecordedActions.push({ timestamp: Date.now(), type: 'select', description: desc, element: el, value: text, selector: sel || undefined, method: 'select', arguments: [optionValue != null ? String(optionValue) : ''] });
+  }
+  doc.addEventListener('click', clickHandler, true);
+  win._actionRecorderListeners.push({ type: 'click', handler: clickHandler });
+  doc.addEventListener('input', inputHandler, true);
+  win._actionRecorderListeners.push({ type: 'input', handler: inputHandler });
+  doc.addEventListener('blur', blurHandler, true);
+  win._actionRecorderListeners.push({ type: 'blur', handler: blurHandler });
+  doc.addEventListener('change', changeHandler, true);
+  win._actionRecorderListeners.push({ type: 'change', handler: changeHandler });
+  return true;
+})();
+`;
+
+/** 供 addInitScript 使用的监听器注入脚本（在页面加载时自动执行，避免 evaluate 受 CSP 等限制） */
+export function getRecorderInitScript(): () => void {
+  return function recorderInitScript() {
+    const doc = document;
+    const win = window as any;
+    /** 根据 DOM 元素生成 XPath，供 Playwright locator('xpath=...') 使用 */
+    const getXPath = (el: any): string => {
+      if (!el || el.nodeType !== 1) return '';
+      if (el.id && typeof document !== 'undefined') {
+        try {
+          const idEsc = String(el.id).replace(/'/g, "''");
+          const result = document.evaluate("count(//*[@id='" + idEsc + "'])", document, null, 1, null) as XPathResult;
+          if (result.numberValue === 1) return "//*[@id='" + idEsc + "']";
+        } catch (_) {}
+      }
+      const parts: string[] = [];
+      let current: any = el;
+      while (current && current.nodeType === 1) {
+        const tag = current.tagName.toLowerCase();
+        let idx = 1;
+        let sib = current.previousSibling;
+        while (sib) {
+          if (sib.nodeType === 1 && sib.tagName && sib.tagName.toLowerCase() === tag) idx++;
+          sib = sib.previousSibling;
+        }
+        parts.unshift(tag + '[' + idx + ']');
+        current = current.parentNode;
+      }
+      return '//' + (parts.length ? parts.join('/') : '*');
+    };
+    const getSelector = (el: any): string => {
+      const xpath = getXPath(el);
+      return xpath ? 'xpath=' + xpath : '';
+    };
+
+    const INPUT_DEBOUNCE_MS = 600;
+    const pending = ((win as any)._inputPending = (win as any)._inputPending || {}) as Record<string, { target: any; timer: ReturnType<typeof setTimeout> }>;
+
+    function setup() {
+      if (win._actionRecorderListeners) {
+        win._actionRecorderListeners.forEach((l: { type: string; handler: (e: Event) => void }) => {
+          try { doc.removeEventListener(l.type, l.handler, true); } catch (_) {}
+        });
+        win._actionRecorderListeners = [];
+      }
+      win._actionRecorderListeners = win._actionRecorderListeners || [];
+      win._uiRecordedActions = win._uiRecordedActions || [];
+
+      const clickHandler = (event: Event) => {
+        const target = (event.target || event.srcElement) as any;
+        if (!target) return;
+        const isCheckbox = target.tagName === 'INPUT' && (target.type === 'checkbox' || target.type === 'radio');
+        const method = isCheckbox ? 'check' : 'click';
+        const el = {
+          tag: target.tagName,
+          text: (target.textContent || '').trim().substring(0, 50) || '',
+          id: target.id || '',
+          className: target.className || '',
+          placeholder: target.placeholder || '',
+          label: (target.labels && target.labels[0] ? target.labels[0].textContent?.trim() : '') || ''
+        };
+        let desc = isCheckbox ? '勾选' : '点击';
+        if (el.label) desc += ' ' + el.label;
+        else if (el.text) desc += ' "' + el.text.substring(0, 30) + '"';
+        else if (el.placeholder) desc += ' ' + el.placeholder;
+        else if (el.id) desc += ' ID为"' + el.id + '"的元素';
+        else desc += ' ' + el.tag + '元素';
+        const selector = getSelector(target);
+        win._uiRecordedActions.push({
+          timestamp: Date.now(),
+          type: 'click',
+          description: desc,
+          element: el,
+          selector: selector || undefined,
+          method,
+          arguments: []
+        });
+      };
+      doc.addEventListener('click', clickHandler, true);
+      win._actionRecorderListeners.push({ type: 'click', handler: clickHandler });
+
+      const inputHandler = (event: Event) => {
+        const target = (event.target || event.srcElement) as any;
+        if (!target || (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA')) return;
+        if (target.type === 'checkbox' || target.type === 'radio') return;
+        const sel = getSelector(target) || 'input:' + Date.now();
+        if (pending[sel]) clearTimeout(pending[sel].timer);
+        pending[sel] = {
+          target,
+          timer: setTimeout(() => {
+            const p = pending[sel];
+            if (!p || !p.target) return;
+            const t = p.target;
+            const elementInfo = {
+              tag: t.tagName,
+              placeholder: t.placeholder || '',
+              id: t.id || '',
+              className: t.className || '',
+              label: (t.labels && t.labels[0] ? t.labels[0].textContent?.trim() : '') || '',
+              type: t.type || ''
+            };
+            const value = t.value;
+            let desc = '在';
+            if (elementInfo.placeholder) desc += '"' + elementInfo.placeholder + '"';
+            else if (elementInfo.label) desc += '"' + elementInfo.label + '"';
+            else if (elementInfo.id) desc += 'ID为"' + elementInfo.id + '"的输入框';
+            else desc += elementInfo.tag + '输入框';
+            desc += '输入 "' + (value || '') + '"';
+            const selector = getSelector(t) || sel;
+            win._uiRecordedActions.push({
+              timestamp: Date.now(),
+              type: 'type',
+              description: desc,
+              element: elementInfo,
+              value,
+              selector: selector || undefined,
+              method: 'fill',
+              arguments: [value != null ? String(value) : '']
+            });
+            delete pending[sel];
+          }, INPUT_DEBOUNCE_MS)
+        };
+      };
+      const flushInputPending = (selector: string) => {
+        const p = pending[selector];
+        if (!p || !p.target) return;
+        clearTimeout(p.timer);
+        const t = p.target;
+        const elementInfo = { tag: t.tagName, placeholder: t.placeholder || '', id: t.id || '', className: t.className || '', label: (t.labels && t.labels[0] ? t.labels[0].textContent?.trim() : '') || '', type: t.type || '' };
+        const value = t.value;
+        let desc = '在';
+        if (elementInfo.placeholder) desc += '"' + elementInfo.placeholder + '"';
+        else if (elementInfo.label) desc += '"' + elementInfo.label + '"';
+        else if (elementInfo.id) desc += 'ID为"' + elementInfo.id + '"的输入框';
+        else desc += elementInfo.tag + '输入框';
+        desc += '输入 "' + (value || '') + '"';
+        const s = getSelector(t) || selector;
+        win._uiRecordedActions.push({ timestamp: Date.now(), type: 'type', description: desc, element: elementInfo, value, selector: s || undefined, method: 'fill', arguments: [value != null ? String(value) : ''] });
+        delete pending[selector];
+      };
+      const blurHandler = (event: Event) => {
+        const target = (event.target || event.srcElement) as any;
+        if (!target || (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA')) return;
+        const selector = getSelector(target);
+        if (selector && pending[selector]) flushInputPending(selector);
+      };
+      doc.addEventListener('input', inputHandler, true);
+      win._actionRecorderListeners.push({ type: 'input', handler: inputHandler });
+      doc.addEventListener('blur', blurHandler, true);
+      win._actionRecorderListeners.push({ type: 'blur', handler: blurHandler });
+
+      const changeHandler = (event: Event) => {
+        const target = (event.target || event.srcElement) as any;
+        if (!target || target.tagName !== 'SELECT') return;
+        const el = {
+          tag: target.tagName,
+          id: target.id || '',
+          className: target.className || '',
+          label: (target.labels && target.labels[0] ? target.labels[0].textContent?.trim() : '') || ''
+        };
+        const text = (target.options && target.options[target.selectedIndex])
+          ? target.options[target.selectedIndex].text
+          : target.value;
+        const optionValue = (target.options && target.options[target.selectedIndex])
+          ? (target.options[target.selectedIndex] as any).value
+          : target.value;
+        let desc = '选择';
+        if (el.label) desc += ' ' + el.label;
+        else if (el.id) desc += ' ID为"' + el.id + '"的下拉框';
+        else desc += '下拉框';
+        desc += '中的选项 "' + (text || '') + '"';
+        const selector = getSelector(target);
+        win._uiRecordedActions.push({
+          timestamp: Date.now(),
+          type: 'select',
+          description: desc,
+          element: el,
+          value: text,
+          selector: selector || undefined,
+          method: 'select',
+          arguments: [optionValue != null ? String(optionValue) : '']
+        });
+      };
+      doc.addEventListener('change', changeHandler, true);
+      win._actionRecorderListeners.push({ type: 'change', handler: changeHandler });
+    }
+    if (doc.readyState === 'loading') {
+      doc.addEventListener('DOMContentLoaded', setup);
+    } else {
+      setup();
+    }
+  };
+}
 
 export interface RecordedAction {
   timestamp: number;
@@ -16,6 +331,10 @@ export interface RecordedAction {
   };
   value?: string;
   url?: string;
+  /** 供 stagehand.act / Playwright 回放用 */
+  selector?: string;
+  method?: string;
+  arguments?: string[];
 }
 
 export class ActionRecorder {
@@ -50,15 +369,13 @@ export class ActionRecorder {
     const injected = await this.setupInjectedListeners();
     
     if (!injected) {
-      console.warn('[记录器] ⚠️  事件监听器注入失败，尝试使用CDP方式...');
-      // 尝试使用 CDP 作为备用方案
       try {
         await this.setupCDPListeners();
-        console.log('[记录器] CDP监听器设置成功');
-      } catch (cdpError) {
-        console.warn('[记录器] CDP方式也失败，将仅使用轮询机制记录操作');
-        console.warn('[记录器] 提示: 操作记录可能会有延迟，但不会影响基本功能');
+      } catch {
+        // CDP 不可用时忽略
       }
+      // 无论注入/CDP 是否成功，轮询都会从 window._uiRecordedActions 拉取（init 脚本会在导航后写入）
+      console.log('[记录器] 将使用轮询机制记录操作');
     }
 
     // 尝试监听页面导航事件（如果支持的话）
@@ -87,6 +404,18 @@ export class ActionRecorder {
    * @returns 是否成功注入
    */
   private async setupInjectedListeners(): Promise<boolean> {
+    // 若 addInitScript 已注入监听器，直接视为成功
+    try {
+      const alreadySet = await this.page.evaluate(() => {
+        const w = typeof window !== 'undefined' ? (window as any) : null;
+        return !!(w && w._actionRecorderListeners && w._actionRecorderListeners.length > 0);
+      });
+      if (alreadySet) {
+        return true;
+      }
+    } catch {
+      // 忽略，继续走注入流程
+    }
     // 等待页面就绪（多次重试）
     let retries = 5;
     while (retries > 0) {
@@ -113,170 +442,12 @@ export class ActionRecorder {
       retries--;
     }
 
-    // 在页面中设置监听器
+    // 使用纯字符串脚本注入，避免 tsx 序列化时注入 __name 导致 ReferenceError
     try {
-      await this.page.evaluate(() => {
-        // @ts-ignore - 这些代码在浏览器环境中运行
-        const doc = document;
-        // @ts-ignore
-        const win = window as any;
-        
-        // 清除旧的监听器（如果存在）
-        if (win._actionRecorderListeners) {
-          win._actionRecorderListeners.forEach((listener: any) => {
-            try {
-              doc.removeEventListener(listener.type, listener.handler, true);
-            } catch (e) {
-              // 忽略错误
-            }
-          });
-          win._actionRecorderListeners = [];
-        }
-
-        if (!win._actionRecorderListeners) {
-          win._actionRecorderListeners = [];
-        }
-      // 点击事件
-      const clickHandler = (event: Event) => {
-        // @ts-ignore
-        const target = event.target as HTMLElement;
-        const elementInfo = {
-          tag: target.tagName,
-          text: target.textContent?.trim().substring(0, 50) || '',
-          id: target.id || '',
-          className: target.className || '',
-          // @ts-ignore
-          placeholder: (target as HTMLInputElement).placeholder || '',
-          label: (target as any).labels?.[0]?.textContent?.trim() || ''
-        };
-        
-        let description = '点击';
-        if (elementInfo.label) {
-          description += ` ${elementInfo.label}`;
-        } else if (elementInfo.text) {
-          description += ` "${elementInfo.text.substring(0, 30)}"`;
-        } else if (elementInfo.placeholder) {
-          description += ` ${elementInfo.placeholder}`;
-        } else if (elementInfo.id) {
-          description += ` ID为"${elementInfo.id}"的元素`;
-        } else {
-          description += ` ${elementInfo.tag}元素`;
-        }
-
-        const action = {
-          timestamp: Date.now(),
-          type: 'click',
-          description,
-          element: elementInfo
-        };
-        if (!win._uiRecordedActions) {
-          win._uiRecordedActions = [];
-        }
-        win._uiRecordedActions.push(action);
-        // 调试：在控制台输出（仅在开发时有用）
-        if (win.console && win.console.log) {
-          win.console.log('[操作记录]', description);
-        }
-      };
-      doc.addEventListener('click', clickHandler, true);
-      win._actionRecorderListeners.push({ type: 'click', handler: clickHandler });
-
-      // 输入事件
-      const inputHandler = (event: Event) => {
-        // @ts-ignore
-        const target = event.target as HTMLElement;
-        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
-          // @ts-ignore
-          const input = target as HTMLInputElement;
-          const elementInfo = {
-            tag: input.tagName,
-            placeholder: input.placeholder || '',
-            id: input.id || '',
-            className: input.className || '',
-            label: (input as any).labels?.[0]?.textContent?.trim() || '',
-            type: input.type || ''
-          };
-          const value = input.value;
-          
-          let description = '在';
-          if (elementInfo.placeholder) {
-            description += `"${elementInfo.placeholder}"`;
-          } else if (elementInfo.label) {
-            description += `"${elementInfo.label}"`;
-          } else if (elementInfo.id) {
-            description += `ID为"${elementInfo.id}"的输入框`;
-          } else {
-            description += `${elementInfo.tag}输入框`;
-          }
-          description += `输入 "${value}"`;
-
-          const action = {
-            timestamp: Date.now(),
-            type: 'type',
-            description,
-            element: elementInfo,
-            value
-          };
-          if (!win._uiRecordedActions) {
-            win._uiRecordedActions = [];
-          }
-          win._uiRecordedActions.push(action);
-          // 调试：在控制台输出
-          if (win.console && win.console.log) {
-            win.console.log('[操作记录]', description);
-          }
-        }
-      };
-      doc.addEventListener('input', inputHandler, true);
-      win._actionRecorderListeners.push({ type: 'input', handler: inputHandler });
-
-      // 选择事件
-      const changeHandler = (event: Event) => {
-        // @ts-ignore
-        const target = event.target as HTMLElement;
-        if (target.tagName === 'SELECT') {
-          // @ts-ignore
-          const select = target as HTMLSelectElement;
-          const elementInfo = {
-            tag: select.tagName,
-            id: select.id || '',
-            className: select.className || '',
-            label: (select as any).labels?.[0]?.textContent?.trim() || ''
-          };
-          const text = select.options[select.selectedIndex]?.text || select.value;
-          
-          let description = '选择';
-          if (elementInfo.label) {
-            description += ` ${elementInfo.label}`;
-          } else if (elementInfo.id) {
-            description += ` ID为"${elementInfo.id}"的下拉框`;
-          } else {
-            description += `下拉框`;
-          }
-          description += `中的选项 "${text}"`;
-
-          const action = {
-            timestamp: Date.now(),
-            type: 'select',
-            description,
-            element: elementInfo,
-            value: text
-          };
-          if (!win._uiRecordedActions) {
-            win._uiRecordedActions = [];
-          }
-          win._uiRecordedActions.push(action);
-          // 调试：在控制台输出
-          if (win.console && win.console.log) {
-            win.console.log('[操作记录]', description);
-          }
-        }
-      };
-      doc.addEventListener('change', changeHandler, true);
-      win._actionRecorderListeners.push({ type: 'change', handler: changeHandler });
-      
-      return true; // 表示成功设置
-    });
+      await this.page.evaluate(
+        (script: string) => (new Function(script))(),
+        RECORDER_EVALUATE_SCRIPT
+      );
       // 验证监听器是否真的被设置了
       const verifyResult = await this.page.evaluate(() => {
         // @ts-ignore
@@ -307,22 +478,19 @@ export class ActionRecorder {
   }
 
   /**
-   * 使用 CDP 设置事件监听器（备用方案）
+   * 使用 CDP 连接（备用方案，仅建立连接便于后续扩展；实际记录仍依赖注入脚本或轮询）
    */
   private async setupCDPListeners(): Promise<void> {
     try {
-      // 启用 DOM 事件监听
-      await this.page.sendCDP('DOM.enable');
-      await this.page.sendCDP('Runtime.enable');
-      
-      // 监听 DOM 事件
-      this.page.on('CDPEvent', (event: any) => {
-        if (event.name === 'DOM.click' || event.name === 'DOM.input' || event.name === 'DOM.change') {
-          // 处理事件
-          // 注意：CDP 事件的处理比较复杂，这里先不实现
-          // 主要依赖注入脚本方式
-        }
-      });
+      const ctx = typeof this.page.context === 'function' ? this.page.context() : null;
+      if (!ctx || typeof ctx.newCDPSession !== 'function') {
+        throw new Error('当前 page 不支持 CDP');
+      }
+      const cdp = await ctx.newCDPSession(this.page);
+      await cdp.send('DOM.enable');
+      await cdp.send('Runtime.enable');
+      // CDP 仅作连接验证，事件记录仍依赖注入脚本
+      return;
     } catch (error) {
       throw new Error('CDP监听器设置失败');
     }
@@ -422,16 +590,22 @@ export class ActionRecorder {
   }
 
   /**
-   * 停止记录
+   * 仅停止轮询、不再记录（不访问 page，避免 Ctrl+C 时挂起）。
+   * 用于 stop() 流程中先停轮询再保存文件。
    */
-  async stopRecording(): Promise<void> {
+  stopRecordingSync(): void {
     this.isRecording = false;
-    
-    // 停止轮询
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
+  }
+
+  /**
+   * 停止记录（含清理页面监听器、拉取剩余操作；可能因 page.evaluate 挂起）
+   */
+  async stopRecording(): Promise<void> {
+    this.stopRecordingSync();
 
     // 清理页面中的监听器
     try {
@@ -486,6 +660,18 @@ export class ActionRecorder {
    */
   getActions(): RecordedAction[] {
     return this.actions;
+  }
+
+  /**
+   * 获取可供 stagehand.act / executeActionWithPlaywright 回放用的 ActionJson 列表
+   */
+  getActionsForAct(): ActionJson[] {
+    return this.actions.map((a): ActionJson => ({
+      selector: a.selector || (a.element?.id ? '#' + a.element.id : ''),
+      description: a.description,
+      method: a.method || (a.type === 'type' ? 'type' : a.type === 'select' ? 'select' : 'click'),
+      arguments: Array.isArray(a.arguments) ? a.arguments : (a.value != null ? [String(a.value)] : [])
+    })).filter(a => a.selector.length > 0);
   }
 
   /**

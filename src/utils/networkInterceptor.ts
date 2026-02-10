@@ -28,6 +28,7 @@ export interface NetworkResponse {
 
 export class NetworkInterceptor {
   private page: any;
+  private cdpSession: any = null;
   private endpoints: ApiEndpoint[] = [];
   private recordedRequests: NetworkRequest[] = [];
   private recordedResponses: NetworkResponse[] = [];
@@ -45,10 +46,27 @@ export class NetworkInterceptor {
   }
 
   /**
+   * 发送 CDP 命令：Playwright 的 page 无 sendCDP，需通过 context.newCDPSession(page) 获取 session 后 send
+   */
+  private async sendCDP(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    if (typeof this.page.sendCDP === 'function') {
+      return (this.page as any).sendCDP(method, params);
+    }
+    if (!this.cdpSession) {
+      const ctx = typeof this.page.context === 'function' ? this.page.context() : this.page._context;
+      if (ctx && typeof ctx.newCDPSession === 'function') {
+        this.cdpSession = await ctx.newCDPSession(this.page);
+      }
+    }
+    if (this.cdpSession && typeof this.cdpSession.send === 'function') {
+      return this.cdpSession.send(method as any, params);
+    }
+    throw new Error('CDP session 不可用');
+  }
+
+  /**
    * 开始拦截网络请求
-   * 注意：Stagehand v3 的 Page 类不支持 Playwright 的 route() 和 on() 方法
-   * 这里实现一个简化版本，使用 CDP 来记录网络请求
-   * Mock 功能需要更复杂的实现，暂时只支持记录
+   * Playwright 的 Page 无 sendCDP，使用 context.newCDPSession(page) 获取 session 后发送 CDP
    */
   async startIntercepting(): Promise<void> {
     if (this.isIntercepting) {
@@ -59,18 +77,12 @@ export class NetworkInterceptor {
     this.recordedRequests = [];
     this.recordedResponses = [];
 
-    // 使用 CDP 启用 Network 域来记录网络活动
     try {
-      await this.page.sendCDP('Network.enable');
-      console.log('[网络拦截] 已启用网络记录（注意：Mock 功能在 Stagehand v3 中需要额外实现）');
+      await this.sendCDP('Network.enable');
+      console.log('[网络拦截] 已启用网络记录');
     } catch (error) {
       console.warn('[网络拦截] 无法启用网络记录:', error);
     }
-
-    // 注意：由于 Stagehand v3 的 Page 类不支持事件监听，
-    // 网络请求和响应的记录需要通过其他方式实现
-    // 这里暂时留空，实际使用时需要通过 CDP 事件或其他机制来实现
-    // 如果需要完整的网络拦截功能，建议使用 Stagehand 的 context 或其他 API
   }
 
   /**
@@ -101,14 +113,13 @@ export class NetworkInterceptor {
    */
   async stopIntercepting(): Promise<void> {
     this.isIntercepting = false;
-    // 禁用 Network 和 Fetch 域
     try {
-      await this.page.sendCDP('Network.disable');
-      await this.page.sendCDP('Fetch.disable');
+      await this.sendCDP('Network.disable');
+      await this.sendCDP('Fetch.disable');
     } catch (error) {
       // 忽略错误
     }
-    // 清理监听器
+    this.cdpSession = null;
     delete (this.page as any)._networkRequestListener;
     delete (this.page as any)._networkResponseListener;
   }

@@ -12,7 +12,8 @@
     "test:local": "tsx src/index.ts --excel excel/test-cases-template.xlsx --headless false",
     "dev": "tsx watch src/index.ts",
     "llm:setup": "bash scripts/setup-ollama.sh",
-    "debug": "DEBUG=true tsx src/index.ts --interactive --debug --headless false"
+    "debug": "DEBUG=true tsx src/index.ts --interactive --debug --headless false",
+    "stop-recording": "touch records/.stop-recording"
   },
   "keywords": [
     "ui-testing",

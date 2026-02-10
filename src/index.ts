@@ -13,8 +13,8 @@ import { ReportGenerator } from './report/reportGenerator.js';
 import { RecorderMode } from './recorder/recorderMode.js';
 import { InteractiveMode } from './mode/interactiveMode.js';
 import chalk from 'chalk';
-import { join } from 'path';
-import { existsSync } from 'fs';
+import { join, resolve } from 'path';
+import { existsSync, unlinkSync } from 'fs';
 import { ensureDir } from './utils/fsUtils.js';
 
 
@@ -52,7 +52,7 @@ async function main(): Promise<void> {
     createTemplate: false,
     record: false,
     recordUrl: null,
-    recordOutput: './recorded-actions.json',
+    recordOutput: './records',
     apiConfig: null,
     interactive: false,
     interactiveUrl: null,
@@ -83,9 +83,11 @@ async function main(): Promise<void> {
       case '--record':
       case '-r':
         options.record = true;
-        break;
-      case '--record-url':
-        options.recordUrl = args[++i];
+        // 若下一个参数是 URL（以 http 开头），直接作为 recordUrl，方便写：-r https://...
+        const next = args[i + 1];
+        if (next && (next.startsWith('http://') || next.startsWith('https://'))) {
+          options.recordUrl = args[++i];
+        }
         break;
       case '--record-output':
         options.recordOutput = args[++i];
@@ -335,28 +337,50 @@ async function runRecordMode(options: CommandLineOptions): Promise<void> {
     console.log(chalk.cyan('='.repeat(80)));
     console.log('');
 
+    // 记录模式需要可见浏览器供用户操作，默认不使用无头模式
     const recorder = new RecorderMode({
       url: options.recordUrl || undefined,
       excelFile: options.apiConfig || undefined,
       outputFile: options.recordOutput,
-      headless: options.headless,
+      headless: false,
       debug: options.debug
     });
 
-    // 处理Ctrl+C信号
-    process.on('SIGINT', async () => {
+    // 处理 Ctrl+C：先保存再退出，避免异步未完成就退出
+    process.on('SIGINT', () => {
       console.log(chalk.yellow('\n\n收到停止信号，正在保存记录...'));
-      await recorder.stop();
-      process.exit(0);
+      recorder
+        .stop()
+        .then(() => process.exit(0))
+        .catch((err: any) => {
+          console.error(chalk.red('保存时出错:'), err?.message || err);
+          process.exit(1);
+        });
     });
 
     await recorder.start();
 
-    // 保持运行直到用户停止
-    console.log(chalk.yellow('记录模式运行中，按 Ctrl+C 停止...'));
-    
-    // 保持进程运行
-    await new Promise(() => {}); // 永远等待，直到被SIGINT中断
+    const stopFile = resolve(process.cwd(), 'records', '.stop-recording');
+    console.log(chalk.yellow('记录模式运行中，按 Ctrl+C 停止'));
+    console.log(chalk.cyan('  若需完整 trace（含截图），请用另一终端执行: touch records/.stop-recording'));
+    console.log('');
+
+    await new Promise<void>((_, reject) => {
+      const t = setInterval(async () => {
+        if (!existsSync(stopFile)) return;
+        clearInterval(t);
+        try {
+          if (existsSync(stopFile)) unlinkSync(stopFile);
+        } catch {}
+        console.log(chalk.yellow('\n检测到 records/.stop-recording，正在保存记录...'));
+        try {
+          await recorder.stop();
+          process.exit(0);
+        } catch (err: any) {
+          reject(err);
+        }
+      }, 2000);
+    });
 
   } catch (error: any) {
     console.error(chalk.red('\n✗ 记录模式执行失败:'), error);
@@ -372,7 +396,7 @@ ${chalk.bold.cyan('UI自动化测试工具 - 使用说明')}
 ${chalk.bold('基本用法:')}
   node dist/index.js --excel <测试用例文件>
   node dist/index.js --template  # 创建Excel模板
-  node dist/index.js --record    # 启动操作记录模式
+  node dist/index.js --record <URL>  # 启动操作记录模式
   node dist/index.js --interactive  # 启动交互式测试模式
 
 ${chalk.bold('命令行选项:')}
@@ -382,9 +406,8 @@ ${chalk.bold('命令行选项:')}
   --debug, -d              启用调试模式
   --max-concurrency <数值>  最大并发用例数/浏览器实例数 (默认: 5)
   --template, -t            创建Excel模板文件
-  --record, -r              启动操作记录模式
-  --record-url <URL>        记录模式：初始URL（可选）
-  --record-output <文件>    记录模式：输出文件路径 (默认: ./recorded-actions.json)
+  --record, -r <URL>        启动操作记录模式，URL 为可选初始地址
+  --record-output <目录>    记录模式：输出目录，生成 record-时间戳.json 与 record-时间戳.zip (默认: ./records)
   --interactive, -i         启动交互式测试模式
   --interactive-url <URL>   交互模式：初始URL（可选）
   --api-config <文件>       API配置Excel文件（用于mock，测试和记录模式都支持）
@@ -411,10 +434,10 @@ ${chalk.bold('示例:')}
   node dist/index.js --excel test-cases.xlsx
 
   # 启动记录模式（手动操作浏览器，自动记录）
-  node dist/index.js --record --record-url https://example.com
+  node dist/index.js --record https://example.com
 
   # 启动记录模式并配置API mock
-  node dist/index.js --record --record-url https://example.com --api-config api-config.xlsx
+  node dist/index.js --record https://example.com --api-config api-config.xlsx
 
   # 启动交互式测试模式
   node dist/index.js --interactive

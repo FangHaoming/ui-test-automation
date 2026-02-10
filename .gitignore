@@ -1,8 +1,8 @@
 node_modules/
 *.log
 .DS_Store
-reports/
-traces/
+/traces
+/records
 *.xlsx
 !test-cases-template.xlsx
 .env
