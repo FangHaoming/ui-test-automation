@@ -7,9 +7,9 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { parseTestCases } from './excelParser.js';
 import type { TestCase } from './excelParser.js';
-import type { TestResult, TestStatistics } from './testExecutor.js';
-import type { NetworkRequest, NetworkResponse } from './networkInterceptor.js';
-import type { AssertionPlan } from './aiAssertionEngine.js';
+import type { TestResult, TestStatistics } from '../executor/testExecutor.js';
+import type { NetworkRequest, NetworkResponse } from '../utils/networkInterceptor.js';
+import type { AssertionPlan } from '../ai/aiAssertionEngine.js';
 
 /** 持久化时的测试结果：只保留与回放和断言相关的字段 */
 export interface TestResultJson {

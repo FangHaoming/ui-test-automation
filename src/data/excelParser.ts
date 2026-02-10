@@ -1,5 +1,5 @@
 import ExcelJS from 'exceljs';
-import type { ApiEndpoint } from './networkInterceptor.js';
+import type { ApiEndpoint } from '../utils/networkInterceptor.js';
 
 /**
  * 测试用例接口

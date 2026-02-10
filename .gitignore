@@ -9,6 +9,6 @@ traces/
 .idea/
 .vscode/
 dist/
-data/
-excel/
+/data
+/excel
 *.tsbuildinfo

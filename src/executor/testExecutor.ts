@@ -3,17 +3,17 @@ import { mkdirSync } from 'fs';
 import { join } from 'path';
 import { chromium, type BrowserContext } from '@playwright/test';
 import { Stagehand } from '@browserbasehq/stagehand';
-import type { TestCase } from './excelParser';
-import { parseApiEndpoints } from './excelParser';
-import { NetworkInterceptor } from './networkInterceptor';
-import { ensurePlaywrightBrowsersInstalled } from './browserChecker';
-import { validateWithZodSchema } from './zodSchemaGenerator';
-import { AISdkClient } from './aisdkClient';
+import type { TestCase } from '../data/excelParser.js';
+import { parseApiEndpoints } from '../data/excelParser.js';
+import { NetworkInterceptor } from '../utils/networkInterceptor.js';
+import { ensurePlaywrightBrowsersInstalled } from '../utils/browserChecker.js';
+import { validateWithZodSchema } from '../utils/zodSchemaGenerator.js';
+import { AISdkClient } from '../ai/aisdkClient.js';
 import chalk from 'chalk';
-import { OpenaiProvider } from './client-provider/openai-provider';
-import { OllamaProvider } from './client-provider/ollama-provider';
-import { verifyExpectedResultWithAI, type AssertionPlan } from './aiAssertionEngine';
-import type { ActResultJson, ActionJson } from './dataStore.js';
+import { OpenaiProvider } from '../ai/providers/openai-provider.js';
+import { OllamaProvider } from '../ai/providers/ollama-provider.js';
+import { verifyExpectedResultWithAI, type AssertionPlan } from '../ai/aiAssertionEngine.js';
+import type { ActResultJson, ActionJson } from '../data/dataStore.js';
 
 /**
  * 测试步骤结果接口

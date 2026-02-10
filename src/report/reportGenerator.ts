@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import type { TestResult, TestStatistics } from './testExecutor.js';
+import type { TestResult, TestStatistics } from '../executor/testExecutor.js';
 
 /**
  * 生成测试报告

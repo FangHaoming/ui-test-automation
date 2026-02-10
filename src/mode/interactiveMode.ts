@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { Stagehand } from '@browserbasehq/stagehand';
 import chalk from 'chalk';
 import * as readline from 'readline';
-import { TestExecutor, type TestExecutorOptions } from './testExecutor.js';
+import { TestExecutor, type TestExecutorOptions } from '../executor/testExecutor.js';
 
 /**
  * 交互式测试模式配置选项

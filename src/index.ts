@@ -1,17 +1,18 @@
 import 'dotenv/config';
-import { createTemplateWithApiConfig, parseApiEndpoints } from './excelParser.js';
+import { createTemplateWithApiConfig, parseApiEndpoints } from './data/excelParser.js';
 import {
   loadTestCasesFromExcelAndSave,
   saveTestResults,
   loadDataFile,
+  ensureDataDir,
   type ActResultJson,
   type TestResultJson
-} from './dataStore.js';
-import type { AssertionPlan } from './aiAssertionEngine.js';
-import { TestExecutor } from './testExecutor.js';
-import { ReportGenerator } from './reportGenerator.js';
-import { RecorderMode } from './recorderMode.js';
-import { InteractiveMode } from './interactiveMode.js';
+} from './data/dataStore.js';
+import type { AssertionPlan } from './ai/aiAssertionEngine.js';
+import { TestExecutor } from './executor/testExecutor.js';
+import { ReportGenerator } from './report/reportGenerator.js';
+import { RecorderMode } from './recorder/recorderMode.js';
+import { InteractiveMode } from './mode/interactiveMode.js';
 import chalk from 'chalk';
 import { join } from 'path';
 import { existsSync } from 'fs';
@@ -124,7 +125,8 @@ async function main(): Promise<void> {
 
   // 如果只是创建模板
   if (options.createTemplate) {
-    const templatePath = join(process.cwd(), 'test-cases-template.xlsx');
+    await ensureDataDir();
+    const templatePath = join(process.cwd(), 'data', 'test-cases-template.xlsx');
     await createTemplateWithApiConfig(templatePath);
     console.log(chalk.green('\n✓ 模板文件创建成功！'));
     console.log(chalk.cyan('请填写测试用例后使用 --excel 参数运行测试。'));

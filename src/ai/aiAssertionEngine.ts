@@ -1,5 +1,5 @@
 import type { Stagehand } from '@browserbasehq/stagehand';
-import type { AISdkClient } from './aisdkClient';
+import type { AISdkClient } from './aisdkClient.js';
 
 /** URL 断言：用 page.url() 校验，observe 无法“观察”URL */
 export interface UrlAssertion {

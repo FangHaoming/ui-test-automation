@@ -4,17 +4,18 @@
 
 import 'dotenv/config';
 import { Stagehand } from '@browserbasehq/stagehand';
-import { ActionRecorder, type RecordedAction } from './actionRecorder';
-import { NetworkInterceptor, type ApiEndpoint, type NetworkResponse, type NetworkRequest } from './networkInterceptor';
-import { parseApiEndpoints } from './excelParser';
-import { ensureDataFileFromExcel, saveApiRecords } from './dataStore';
-import { ensurePlaywrightBrowsersInstalled } from './browserChecker';
-import { generateZodSchemaCode } from './zodSchemaGenerator';
-import { OllamaProvider } from './client-provider/ollama-provider';
+import { ActionRecorder, type RecordedAction } from './actionRecorder.js';
+import { NetworkInterceptor, type ApiEndpoint, type NetworkResponse, type NetworkRequest } from '../utils/networkInterceptor.js';
+import { parseApiEndpoints } from '../data/excelParser.js';
+import { ensureDataFileFromExcel, saveApiRecords } from '../data/dataStore.js';
+import { ensurePlaywrightBrowsersInstalled } from '../utils/browserChecker.js';
+import { generateZodSchemaCode } from '../utils/zodSchemaGenerator.js';
+import { OllamaProvider } from '../ai/providers/ollama-provider.js';
 import chalk from 'chalk';
 import { writeFile } from 'fs/promises';
-import { OpenaiProvider } from './client-provider/openai-provider';
-import { AISdkClient } from './aisdkClient';
+import { OpenaiProvider } from '../ai/providers/openai-provider.js';
+import { AISdkClient } from '../ai/aisdkClient.js';
+
 export interface RecorderOptions {
   url?: string;
   excelFile?: string; // 用于读取API endpoint配置
