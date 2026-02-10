@@ -28,6 +28,8 @@ export interface TestResultJson {
   duration: number;
   /** 本次执行使用的断言计划（由 AI 生成），用于下次复用 */
   assertionPlan?: AssertionPlan;
+  /** Playwright Trace 回放文件路径，可用 npx playwright show-trace <path> 查看 */
+  tracePath?: string;
 }
 
 /** 可 JSON 序列化的测试用例（apiRequestSchemas 为普通对象） */
@@ -260,7 +262,8 @@ export async function saveTestResults(
       startTime: r.startTime instanceof Date ? r.startTime.toISOString() : String(r.startTime),
       endTime: r.endTime instanceof Date ? r.endTime.toISOString() : (r.endTime ? String(r.endTime) : null),
       duration: r.duration,
-      assertionPlan: r.assertionPlan || prevResult?.assertionPlan
+      assertionPlan: r.assertionPlan || prevResult?.assertionPlan,
+      tracePath: r.tracePath
     };
     return { ...tc, result: resultJson };
   });
