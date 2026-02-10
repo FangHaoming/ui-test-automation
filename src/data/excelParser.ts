@@ -12,6 +12,8 @@ export interface TestCase {
   expectedResult: string;
   description: string;
   apiRequestSchemas?: Map<string, string>; // API URL -> Zod Schema字符串
+  /** 是否在录制模式中对该用例进行录制（来自 Excel 第10列“是否录制”） */
+  recordEnabled?: boolean;
 }
 
 /**
@@ -84,6 +86,9 @@ export async function parseTestCases(filePath: string): Promise<TestCase[]> {
       return String(cell.value);
     };
     
+    const recordFlag = getCellValue(row.getCell(10)).trim();
+    const recordEnabled = !!recordFlag && /^(是|yes|y|true|1)$/i.test(recordFlag);
+
     const testCase: TestCase = {
       id: getCellValue(row.getCell(1)) || `TC-${rowNumber - 1}`,
       name: getCellValue(row.getCell(2)),
@@ -91,10 +96,12 @@ export async function parseTestCases(filePath: string): Promise<TestCase[]> {
       steps: parseSteps(getCellValue(row.getCell(4))),
       expectedResult: getCellValue(row.getCell(5)),
       description: getCellValue(row.getCell(6)),
-      apiRequestSchemas: apiRequestSchemas.size > 0 ? apiRequestSchemas : undefined
+      apiRequestSchemas: apiRequestSchemas.size > 0 ? apiRequestSchemas : undefined,
+      recordEnabled
     };
     
-    if (testCase.steps.length > 0) {
+    // 正常测试执行要求必须有步骤；但若仅用于录制（recordEnabled），允许 steps 为空
+    if (testCase.steps.length > 0 || recordEnabled) {
       testCases.push(testCase);
     }
   }
@@ -287,7 +294,8 @@ export async function createTemplateWithApiConfig(filePath: string): Promise<voi
     { header: '备注', key: 'description', width: 30 },
     { header: 'API URL', key: 'apiUrl', width: 50 },
     { header: 'API Request', key: 'apiRequest', width: 80 },
-    { header: 'API Response', key: 'apiResponse', width: 80 }
+    { header: 'API Response', key: 'apiResponse', width: 80 },
+    { header: '是否录制', key: 'recordEnabled', width: 12 }
   ];
   
   // 设置表头样式
@@ -308,7 +316,8 @@ export async function createTemplateWithApiConfig(filePath: string): Promise<voi
     description: '验证正常登录流程',
     apiUrl: '/api/login\n/api/user',
     apiRequest: '（记录操作时自动填充Zod校验规则）',
-    apiResponse: '（记录操作时自动填充）'
+    apiResponse: '（记录操作时自动填充）',
+    recordEnabled: '是'
   });
   
   testCaseSheet.addRow({

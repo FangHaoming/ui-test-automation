@@ -4,6 +4,7 @@ import {
   loadTestCasesFromExcelAndSave,
   saveTestResults,
   loadDataFile,
+  ensureDataFileFromExcel,
   type ActResultJson,
   type TestResultJson
 } from './data/dataStore.js';
@@ -28,6 +29,7 @@ interface CommandLineOptions {
   debug: boolean;
   createTemplate: boolean;
   record: boolean;
+  recordFromExcel: boolean;
   recordUrl: string | null;
   recordOutput: string;
   apiConfig: string | null;
@@ -51,6 +53,7 @@ async function main(): Promise<void> {
     debug: false,
     createTemplate: false,
     record: false,
+    recordFromExcel: false,
     recordUrl: null,
     recordOutput: './records',
     apiConfig: null,
@@ -88,6 +91,9 @@ async function main(): Promise<void> {
         if (next && (next.startsWith('http://') || next.startsWith('https://'))) {
           options.recordUrl = args[++i];
         }
+        break;
+      case '--record-from-excel':
+        options.recordFromExcel = true;
         break;
       case '--record-output':
         options.recordOutput = args[++i];
@@ -140,6 +146,12 @@ async function main(): Promise<void> {
   // 如果是交互模式
   if (options.interactive) {
     await runInteractiveMode(options);
+    return;
+  }
+
+  // 如果是从 Excel 启动记录模式
+  if (options.recordFromExcel) {
+    await runRecordFromExcel(options);
     return;
   }
 
@@ -389,6 +401,52 @@ async function runRecordMode(options: CommandLineOptions): Promise<void> {
   }
 }
 
+/**
+ * 根据 Excel 中标记的用例启动记录模式
+ * 使用同一份 Excel 作为测试用例与 API 配置来源
+ */
+async function runRecordFromExcel(options: CommandLineOptions): Promise<void> {
+  try {
+    if (!options.excelFile) {
+      console.error(chalk.red('错误: 使用 --record-from-excel 时必须指定 --excel <测试用例文件>'));
+      process.exit(1);
+    }
+
+    const excelPath = options.excelFile;
+    const { testCases } = await ensureDataFileFromExcel(excelPath);
+    const toRecord = testCases.filter(tc => tc.recordEnabled);
+
+    if (toRecord.length === 0) {
+      console.warn(chalk.yellow('警告: Excel 中未找到标记为“是否录制”的用例（第10列“是否录制”）'));
+      return;
+    }
+
+    const target = toRecord[0];
+
+    console.log(chalk.cyan('='.repeat(80)));
+    console.log(chalk.bold.cyan('从 Excel 启动操作记录模式'));
+    console.log(chalk.cyan('='.repeat(80)));
+    console.log('');
+    console.log(chalk.cyan(`将为用例 ${target.id} - ${target.name} 启动浏览器:`));
+    console.log('  URL:', target.url);
+    console.log('');
+
+    const recordOptions: CommandLineOptions = {
+      ...options,
+      record: true,
+      recordUrl: target.url,
+      // 使用同一份 Excel 作为 API 配置来源，便于记录 apiRecords
+      apiConfig: excelPath
+    };
+
+    await runRecordMode(recordOptions);
+  } catch (error: any) {
+    console.error(chalk.red('\n✗ 记录模式（来自 Excel）执行失败:'), error);
+    console.error(error.stack);
+    process.exit(1);
+  }
+}
+
 function printHelp(): void {
   console.log(`
 ${chalk.bold.cyan('UI自动化测试工具 - 使用说明')}
@@ -397,6 +455,7 @@ ${chalk.bold('基本用法:')}
   node dist/index.js --excel <测试用例文件>
   node dist/index.js --template  # 创建Excel模板
   node dist/index.js --record <URL>  # 启动操作记录模式
+  node dist/index.js --excel <测试用例文件> --record-from-excel  # 按Excel中“是否录制”列启动记录模式
   node dist/index.js --interactive  # 启动交互式测试模式
 
 ${chalk.bold('命令行选项:')}
@@ -408,6 +467,7 @@ ${chalk.bold('命令行选项:')}
   --template, -t            创建Excel模板文件
   --record, -r <URL>        启动操作记录模式，URL 为可选初始地址
   --record-output <目录>    记录模式：输出目录，生成 record-时间戳.json 与 record-时间戳.zip (默认: ./records)
+  --record-from-excel       根据Excel中“是否录制”列（第10列），按用例URL启动记录模式
   --interactive, -i         启动交互式测试模式
   --interactive-url <URL>   交互模式：初始URL（可选）
   --api-config <文件>       API配置Excel文件（用于mock，测试和记录模式都支持）

@@ -43,6 +43,8 @@ export interface TestCaseJson {
   steps: string[];
   expectedResult: string;
   description: string;
+  /** 是否在录制模式中对该用例进行录制（来自 Excel 第10列“是否录制”） */
+  recordEnabled?: boolean;
   apiRequestSchemas?: Record<string, string>;
   /** 该用例最近一次运行结果；result.steps 仅存 actResult 数组 */
   result?: TestResultJson;
@@ -110,6 +112,7 @@ function testCaseToJson(tc: TestCase): TestCaseJson {
     steps: tc.steps,
     expectedResult: tc.expectedResult,
     description: tc.description,
+    recordEnabled: tc.recordEnabled,
     apiRequestSchemas: tc.apiRequestSchemas && tc.apiRequestSchemas.size > 0
       ? Object.fromEntries(tc.apiRequestSchemas)
       : undefined
@@ -126,7 +129,8 @@ function testCaseFromJson(json: TestCaseJson): TestCase {
     description: json.description,
     apiRequestSchemas: json.apiRequestSchemas && Object.keys(json.apiRequestSchemas).length > 0
       ? new Map(Object.entries(json.apiRequestSchemas))
-      : undefined
+      : undefined,
+    recordEnabled: json.recordEnabled
   };
 }
 
