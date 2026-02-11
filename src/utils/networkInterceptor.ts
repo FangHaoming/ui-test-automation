@@ -33,6 +33,8 @@ export class NetworkInterceptor {
   private recordedRequests: NetworkRequest[] = [];
   private recordedResponses: NetworkResponse[] = [];
   private isIntercepting: boolean = false;
+  private requestListener?: (request: any) => void;
+  private responseListener?: (response: any) => void;
 
   constructor(page: any) {
     this.page = page;
@@ -81,7 +83,80 @@ export class NetworkInterceptor {
       await this.sendCDP('Network.enable');
       console.log('[网络拦截] 已启用网络记录');
     } catch (error) {
-      console.warn('[网络拦截] 无法启用网络记录:', error);
+      console.warn('[网络拦截] 无法启用网络记录 (CDP):', error);
+      // 即使启用 Network 失败，下面仍然尝试用 Playwright 的 page 事件记录请求
+    }
+
+    // 使用 Playwright 的 page.on('request' | 'response') 记录网络请求与响应，
+    // 根据已配置的 endpoints 过滤后写入 recordedRequests / recordedResponses。
+    // 这里只做“记录”，不对请求进行拦截或 mock（recordOnly 语义）。
+    try {
+      if (!this.page || typeof this.page.on !== 'function') {
+        console.warn('[网络拦截] 当前 page 不支持事件订阅，无法记录请求/响应');
+        return;
+      }
+
+      this.requestListener = (request: any) => {
+        try {
+          const url = String(request.url() || '');
+          const method = String(request.method() || 'GET');
+          const endpoint = this.findMatchingEndpoint(url, method);
+          if (!endpoint) return;
+
+          const headers = (request.headers?.() || {}) as Record<string, string>;
+          const postData = request.postData?.() as string | undefined;
+
+          this.recordedRequests.push({
+            url,
+            method,
+            headers,
+            postData,
+            timestamp: Date.now()
+          });
+        } catch {
+          // 单个事件解析失败不影响整体
+        }
+      };
+
+      this.responseListener = async (response: any) => {
+        try {
+          const url = String(response.url() || '');
+          const status = Number(response.status?.() ?? response.status() ?? 0);
+          const endpoint = this.findMatchingEndpoint(url, undefined);
+          if (!endpoint) return;
+
+          let body: any = undefined;
+          try {
+            // Playwright 的 Response.body() 可能抛异常（如非 text/JSON），此处兜底为字符串
+            const buf: Buffer = await response.body();
+            const text = buf.toString('utf-8');
+            try {
+              body = JSON.parse(text);
+            } catch {
+              body = text;
+            }
+          } catch {
+            // 获取 body 失败时，仅记录基础信息
+          }
+
+          const headers = (response.headers?.() || {}) as Record<string, string>;
+
+          this.recordedResponses.push({
+            url,
+            status,
+            headers,
+            body,
+            timestamp: Date.now()
+          });
+        } catch {
+          // 单个事件解析失败不影响整体
+        }
+      };
+
+      this.page.on('request', this.requestListener);
+      this.page.on('response', this.responseListener);
+    } catch (error) {
+      console.warn('[网络拦截] 订阅 Playwright 网络事件失败:', error);
     }
   }
 
@@ -120,8 +195,23 @@ export class NetworkInterceptor {
       // 忽略错误
     }
     this.cdpSession = null;
-    delete (this.page as any)._networkRequestListener;
-    delete (this.page as any)._networkResponseListener;
+
+    // 解除 Playwright 事件监听，避免重复记录
+    try {
+      if (this.page && typeof this.page.off === 'function') {
+        if (this.requestListener) {
+          this.page.off('request', this.requestListener);
+        }
+        if (this.responseListener) {
+          this.page.off('response', this.responseListener);
+        }
+      }
+    } catch {
+      // 忽略解除监听时的错误
+    }
+
+    this.requestListener = undefined;
+    this.responseListener = undefined;
   }
 
   /**

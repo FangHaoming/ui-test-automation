@@ -18,6 +18,7 @@ export async function validateApiRequests(
   }
 
   const recordedRequests = networkInterceptor.getRecordedRequests();
+  console.log('[DEBUG] 本次记录到的请求 URL 列表:', recordedRequests.map(r => r.url));
   const errors: string[] = [];
 
   for (const [apiUrl, zodSchemaStr] of apiRequestSchemas.entries()) {

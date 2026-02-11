@@ -8,6 +8,7 @@ import {
   saveTestResults,
   loadDataFile,
   ensureDataFileFromExcel,
+  saveApiRecords,
   type ActResultJson,
   type TestResultJson
 } from './data/dataStore.js';
@@ -15,6 +16,8 @@ import type { AssertionPlan } from './ai/aiAssertionEngine.js';
 import { TestExecutor } from './executor/testExecutor.js';
 import { ReportGenerator } from './report/reportGenerator.js';
 import { RecorderMode } from './recorder/recorderMode.js';
+import { generateZodSchemaCode } from './utils/zodSchemaGenerator.js';
+import type { NetworkRequest, NetworkResponse, ApiEndpoint } from './utils/networkInterceptor.js';
 import { InteractiveMode } from './mode/interactiveMode.js';
 import chalk from 'chalk';
 import { join, resolve } from 'path';
@@ -53,6 +56,10 @@ interface CommandLineOptions {
   onlyFailed: boolean;
   /** 从 JSON 中删除指定测试用例并删除对应 trace（--delete-case <id>，需配合 --data） */
   deleteCase: string | null;
+  /** 仅校验 API 请求（忽略 expectedResult 文本断言），用于页面改版但接口不变场景 */
+  onlyApi: boolean;
+  /** 在执行模式下同时记录 API 请求并写入 data JSON（生成/更新 apiRecords） */
+  recordApi: boolean;
 }
 
 /**
@@ -80,7 +87,9 @@ async function main(): Promise<void> {
     recordTestCaseId: undefined,
     mergeToJson: false,
     onlyFailed: false,
-    deleteCase: null
+    deleteCase: null,
+    onlyApi: false,
+    recordApi: false
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -131,6 +140,12 @@ async function main(): Promise<void> {
         break;
       case '--delete-case':
         options.deleteCase = args[++i] ?? null;
+        break;
+      case '--only-api':
+        options.onlyApi = true;
+        break;
+      case '--record-api':
+        options.recordApi = true;
         break;
       case '--api-config':
       case '--api':
@@ -320,6 +335,26 @@ async function main(): Promise<void> {
 
     // 从每个 testCase.result.steps 汇总历史步骤与断言计划，供回放和断言复用
     const data = await loadDataFile(dataPath);
+
+    // 若未显式提供 apiConfig，但 data JSON 中配置了 apiUrls，则根据 apiUrls 补充 API endpoint 列表
+    if (!options.apiConfig) {
+      const extraEndpoints: any[] = [];
+      (data.testCases || []).forEach(tc => {
+        if (Array.isArray((tc as any).apiUrls) && (tc as any).apiUrls.length > 0) {
+          (tc as any).apiUrls.forEach((url: string) => {
+            extraEndpoints.push({
+              url,
+              recordOnly: true,
+              testCaseId: tc.id
+            });
+          });
+        }
+      });
+      if (extraEndpoints.length > 0) {
+        apiEndpoints.push(...extraEndpoints);
+        console.log(chalk.green(`✓ 已从 data JSON 加载 ${extraEndpoints.length} 个API endpoint配置\n`));
+      }
+    }
     const stepHistory: Record<string, ActResultJson[]> = {};
     const assertionPlans: Record<string, AssertionPlan> = {};
 
@@ -349,9 +384,26 @@ async function main(): Promise<void> {
           if (fromData?.result?.status !== 'failed') return false;
         }
         const hasExpected = !!(tc.expectedResult && String(tc.expectedResult).trim().length > 0);
-        if (!hasExpected) return false;
         const hasSteps = !!(tc.steps && tc.steps.length > 0);
         const hasResultSteps = !!(fromData?.result?.steps && fromData.result.steps.length > 0);
+        const apiRecords = (fromData as any)?.apiRecords as
+          | Record<string, { requestSchema?: string }>
+          | undefined;
+        const hasApiSchemas =
+          !!apiRecords &&
+          Object.values(apiRecords).some(
+            rec => rec && typeof rec.requestSchema === 'string' && rec.requestSchema.trim().length > 0
+          );
+
+        if (options.onlyApi) {
+          // 仅校验 API 时：
+          // - 不再强制要求 expectedResult
+          // - 至少需要“有可回放步骤”或“有可校验的 API schema”，否则跳过
+          if (!hasSteps && !hasResultSteps && !hasApiSchemas) return false;
+          return true;
+        }
+
+        if (!hasExpected) return false;
         return hasSteps || hasResultSteps;
       });
       const skipped = beforeCount - testCases.length;
@@ -370,10 +422,13 @@ async function main(): Promise<void> {
 
     // 并发执行测试用例：为每个用例创建独立的 TestExecutor / 浏览器实例
     // 支持通过 --max-concurrency 控制最大并发数；未设置或 <=0 时默认 5
+    // 若开启 --record-api，则为避免 data JSON 写入冲突，强制串行执行
     const rawMaxConcurrency =
-      typeof options.maxConcurrency === 'number' && options.maxConcurrency > 0
-        ? options.maxConcurrency
-        : 5;
+      options.recordApi
+        ? 1
+        : (typeof options.maxConcurrency === 'number' && options.maxConcurrency > 0
+            ? options.maxConcurrency
+            : 5);
     const maxConcurrency = Math.min(rawMaxConcurrency, testCases.length);
 
     const allResults: typeof TestExecutor.prototype['executeAll'] extends (
@@ -386,10 +441,19 @@ async function main(): Promise<void> {
       const batch = testCases.slice(i, i + maxConcurrency);
       const batchResultsArrays = await Promise.all(
         batch.map(async testCase => {
+        // 为当前用例筛选对应的 API endpoint（用于网络记录与 schema 生成）
+        const endpointsForCase: ApiEndpoint[] =
+          Array.isArray(apiEndpoints) && apiEndpoints.length > 0
+            ? apiEndpoints.filter((ep: any) => !ep.testCaseId || ep.testCaseId === testCase.id)
+            : [];
+
           const executor = new TestExecutor({
             headless: options.headless,
             debug: options.debug,
-            apiConfigFile: options.apiConfig || undefined
+            apiConfigFile: options.apiConfig || undefined,
+            apiEndpoints: endpointsForCase,
+            recordApi: options.recordApi,
+            onlyApi: options.onlyApi
           });
           try {
             const singleResults = await executor.executeAll(
@@ -403,6 +467,64 @@ async function main(): Promise<void> {
                   : {}
               }
             );
+            // 若开启 --record-api，则在每个用例执行完后，基于网络记录写入 data JSON 的 apiRecords
+            if (options.recordApi && endpointsForCase.length > 0) {
+              const snapshot = executor.getNetworkSnapshot();
+              if (snapshot && (snapshot.requests.length > 0 || snapshot.responses.length > 0)) {
+                const testCaseRequestMap = new Map<string, Map<string, NetworkRequest>>();
+                const testCaseResponseMap = new Map<string, Map<string, NetworkResponse>>();
+
+                const reqMapForCase = new Map<string, NetworkRequest>();
+                const resMapForCase = new Map<string, NetworkResponse>();
+
+                endpointsForCase.forEach(ep => {
+                  const endpointUrl = typeof ep.url === 'string' ? ep.url : ep.url.toString();
+                  const safeEndpointUrl = String(endpointUrl || '');
+
+                  const matchingResponses = snapshot.responses.filter(r => {
+                    const responseUrl = r?.url || '';
+                    return responseUrl.includes(safeEndpointUrl) || responseUrl === safeEndpointUrl;
+                  });
+                  const matchingRequests = snapshot.requests.filter(r => {
+                    const requestUrl = r?.url || '';
+                    return requestUrl.includes(safeEndpointUrl) || requestUrl === safeEndpointUrl;
+                  });
+
+                  if (matchingResponses.length > 0) {
+                    const lastResponse = matchingResponses[matchingResponses.length - 1];
+                    const matchingRequest =
+                      matchingRequests.find(r => r.url === lastResponse.url) ||
+                      matchingRequests[matchingRequests.length - 1];
+
+                    resMapForCase.set(endpointUrl, lastResponse);
+                    if (matchingRequest) {
+                      reqMapForCase.set(endpointUrl, matchingRequest);
+                    }
+                  }
+                });
+
+                if (reqMapForCase.size > 0) {
+                  testCaseRequestMap.set(testCase.id, reqMapForCase);
+                }
+                if (resMapForCase.size > 0) {
+                  testCaseResponseMap.set(testCase.id, resMapForCase);
+                }
+
+                if (testCaseRequestMap.size > 0 || testCaseResponseMap.size > 0) {
+                  await saveApiRecords(
+                    dataPath,
+                    testCaseRequestMap,
+                    testCaseResponseMap,
+                    body => generateZodSchemaCode(body)
+                  );
+                  console.log(
+                    chalk.green(
+                      `✓ 已在执行模式下记录用例 ${testCase.id} 的 API 请求/响应并写入到 ${dataPath}`
+                    )
+                  );
+                }
+              }
+            }
             // 关闭对应浏览器实例
             await executor.close();
             return singleResults;
@@ -503,7 +625,8 @@ async function runRecordMode(options: CommandLineOptions): Promise<void> {
     // 记录模式需要可见浏览器供用户操作，默认不使用无头模式
     const recorder = new RecorderMode({
       url: options.recordUrl || undefined,
-      excelFile: options.apiConfig || undefined,
+      // 优先使用 --excel 作为 API URL 来源；若未指定，则退回到旧的 --api-config（兼容老用法）
+      excelFile: options.excelFile || options.apiConfig || undefined,
       dataPath: options.recordDataPath,
       outputFile: options.recordOutput,
       headless: false,
@@ -613,7 +736,8 @@ async function runRecordById(options: CommandLineOptions): Promise<void> {
       recordUrl: target.url,
       recordTestCaseId: target.id,
       recordDataPath: dataPath,
-      apiConfig: excelPath ?? options.apiConfig ?? null
+      // 录制指定用例时，默认用 --excel 对应的测试用例文件里的 API URL 列作为配置，无需单独传 --api-config
+      apiConfig: options.apiConfig
     };
 
     await runRecordMode(recordOptions);
@@ -656,6 +780,7 @@ ${chalk.bold('命令行选项:')}
   --merge-to-json          将 Excel 解析结果合并到 JSON，JSON 中已存在同 ID 的用例则跳过；可配合 --data 指定目标 JSON
   --only-failed             仅执行 result.status 为 failed 的用例（仅 --data 时有效）
   --delete-case <用例ID>    从 JSON 中删除指定用例并删除 traces/trace-<id>.zip（需配合 --data）
+  --record-api              执行模式：在运行测试的同时记录 API 请求并写入 data JSON（生成/更新 apiRecords）
   --help, -h                显示此帮助信息
 
 ${chalk.bold('Excel文件格式:')}

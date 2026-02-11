@@ -108,6 +108,7 @@ export class RecorderMode {
     this.networkInterceptor = new NetworkInterceptor(this.page);
 
     if (this.options.excelFile) {
+      // 优先：如果传入了 Excel，则从 Excel 同步 data JSON，并从 Excel 的「API URL」列解析 endpoint
       try {
         const { dataPath } = await ensureDataFileFromExcel(this.options.excelFile);
         this.dataPath = dataPath;
@@ -118,10 +119,34 @@ export class RecorderMode {
       } catch (error: any) {
         console.warn(chalk.yellow(`警告: 无法读取API配置: ${error.message}`));
       }
-    }
-    if (this.options.dataPath) {
+    } else if (this.options.dataPath) {
+      // 仅传入 data JSON 时，从每个 testCase.apiUrls 恢复 endpoint 配置；
+      // 若存在旧版 apiUrlMapping，则作为兼容兜底。
       this.dataPath = this.options.dataPath;
       console.log(chalk.green(`✓ 数据文件: ${this.dataPath}`));
+      try {
+        const data = await loadDataFile(this.dataPath);
+        const endpoints: ApiEndpoint[] = [];
+        // 仅使用每个用例自身的 apiUrls 字段，不再兼容旧版的 apiUrlMapping
+        (data.testCases || []).forEach(tc => {
+          if (tc.apiUrls && tc.apiUrls.length > 0) {
+            tc.apiUrls.forEach(url => {
+              endpoints.push({
+                url,
+                recordOnly: true,
+                testCaseId: tc.id
+              });
+            });
+          }
+        });
+        if (endpoints.length > 0) {
+          this.apiEndpoints = endpoints;
+          this.networkInterceptor.setEndpoints(endpoints);
+          console.log(chalk.green(`✓ 已从 data JSON 加载 ${endpoints.length} 个API endpoint配置`));
+        }
+      } catch (error: any) {
+        console.warn(chalk.yellow(`警告: 无法从 data JSON 读取 API URL 映射: ${error.message}`));
+      }
     }
 
     await this.networkInterceptor.startIntercepting();

@@ -11,9 +11,6 @@ export interface TestCase {
   steps: string[];
   expectedResult: string;
   description: string;
-  apiRequestSchemas?: Map<string, string>; // API URL -> Zod Schema字符串
-  /** @deprecated 仅用于兼容已有 JSON，不再从 Excel 解析或参与逻辑 */
-  recordEnabled?: boolean;
 }
 
 /**
@@ -42,25 +39,6 @@ export async function parseTestCases(filePath: string): Promise<TestCase[]> {
     // 如果第一列为空，跳过该行
     if (!row.getCell(1).value) {
       continue;
-    }
-    
-    // 读取API Request列（第8列）中的Zod schema
-    const apiRequestCell = row.getCell(8).value?.toString() || '';
-    const apiRequestSchemas = new Map<string, string>();
-    
-    if (apiRequestCell && apiRequestCell.trim()) {
-      // 解析多个API的schema（用---分隔）
-      const apiSchemas = apiRequestCell.split(/\n\n---\n\n/);
-      apiSchemas.forEach(schemaText => {
-        const lines = schemaText.split('\n');
-        if (lines.length > 0) {
-          const apiUrl = lines[0].replace(':', '').trim();
-          const schema = lines.slice(1).join('\n').trim();
-          if (apiUrl && schema) {
-            apiRequestSchemas.set(apiUrl, schema);
-          }
-        }
-      });
     }
     
     // 安全地提取单元格值（处理超链接、公式等特殊情况）
@@ -92,8 +70,7 @@ export async function parseTestCases(filePath: string): Promise<TestCase[]> {
       url: getCellValue(row.getCell(3)),
       steps: parseSteps(getCellValue(row.getCell(4))),
       expectedResult: getCellValue(row.getCell(5)),
-      description: getCellValue(row.getCell(6)),
-      apiRequestSchemas: apiRequestSchemas.size > 0 ? apiRequestSchemas : undefined
+      description: getCellValue(row.getCell(6))
     };
 
     // 只要有测试 ID（第一列）就解析并加入，不要求必须有测试步骤等

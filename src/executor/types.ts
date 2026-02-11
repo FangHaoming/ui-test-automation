@@ -4,6 +4,7 @@
 
 import type { AssertionPlan } from '../ai/aiAssertionEngine.js';
 import type { ActResultJson, ActionJson } from '../data/dataStore.js';
+import type { ApiEndpoint } from '../utils/networkInterceptor.js';
 
 export type { AssertionPlan, ActResultJson, ActionJson };
 
@@ -58,6 +59,15 @@ export interface TestExecutorOptions {
   recordTrace?: boolean;
   /** Trace 文件输出目录，默认 ./traces */
   traceDir?: string;
+  /** 可选：直接传入要拦截的 API endpoint 列表（通常来自 data JSON 的 apiUrls），优先级高于 apiConfigFile */
+  apiEndpoints?: ApiEndpoint[];
+  /** 是否在执行结束后，将本次网络请求持久化到 data JSON（需要配合外层逻辑使用） */
+  recordApi?: boolean;
+  /**
+   * 仅校验 API 请求（忽略 expectedResult 文本断言）
+   * 用于页面改版但接口不变场景
+   */
+  onlyApi?: boolean;
 }
 
 /**

@@ -9,7 +9,7 @@ import { chromium, type BrowserContext } from '@playwright/test';
 import { Stagehand } from '@browserbasehq/stagehand';
 import type { TestCase } from '../data/excelParser.js';
 import { parseApiEndpoints } from '../data/excelParser.js';
-import { NetworkInterceptor } from '../utils/networkInterceptor.js';
+import { NetworkInterceptor, type ApiEndpoint, type NetworkRequest, type NetworkResponse } from '../utils/networkInterceptor.js';
 import { ensurePlaywrightBrowsersInstalled } from '../utils/browserChecker.js';
 import { verifyExpectedResultWithAI } from '../ai/aiAssertionEngine.js';
 import chalk from 'chalk';
@@ -171,18 +171,24 @@ export class TestExecutor {
       throw error;
     }
 
-    if (this.options.apiConfigFile) {
+    // 初始化网络拦截：优先使用外部直接传入的 apiEndpoints，其次尝试从 apiConfigFile 解析
+    let endpoints: ApiEndpoint[] = [];
+    if (this.options.apiEndpoints && this.options.apiEndpoints.length > 0) {
+      endpoints = this.options.apiEndpoints;
+    } else if (this.options.apiConfigFile) {
       try {
-        const endpoints = await parseApiEndpoints(this.options.apiConfigFile);
-        if (endpoints.length > 0) {
-          this.networkInterceptor = new NetworkInterceptor(this.page);
-          this.networkInterceptor.setEndpoints(endpoints);
-          await this.networkInterceptor.startIntercepting();
-          console.log(chalk.green(`✓ 已加载 ${endpoints.length} 个API endpoint配置，开始拦截网络请求`));
-        }
+        endpoints = await parseApiEndpoints(this.options.apiConfigFile);
       } catch (error: any) {
         console.warn(chalk.yellow(`警告: 无法加载API配置: ${error.message}`));
       }
+    }
+    if (endpoints.length > 0) {
+      // 对于执行模式，优先使用 Playwright Page 来做网络监听；若获取不到，则退回 Stagehand 的 page
+      const targetPage = this.getPwPage() ?? this.page;
+      this.networkInterceptor = new NetworkInterceptor(targetPage);
+      this.networkInterceptor.setEndpoints(endpoints);
+      await this.networkInterceptor.startIntercepting();
+      console.log(chalk.green(`✓ 已加载 ${endpoints.length} 个API endpoint配置，开始拦截网络请求`));
     }
 
     console.log('Stagehand初始化完成');
@@ -428,42 +434,96 @@ export class TestExecutor {
         result.steps.push(stepResult);
       }
 
-      if (testCase.apiRequestSchemas && testCase.apiRequestSchemas.size > 0) {
-        this.log(`验证API请求（使用Zod schema）...`);
-        const apiValidationResult = await validateApiRequests(
-          this.networkInterceptor,
-          testCase.id,
-          testCase.apiRequestSchemas
-        );
-        if (!apiValidationResult.success) {
-          result.status = 'failed';
-          result.error = `API请求验证失败: ${apiValidationResult.error}`;
-          this.log(chalk.red(`✗ API请求验证失败: ${apiValidationResult.error}`));
-        } else {
-          this.log(chalk.green(`✓ API请求验证通过`));
-        }
-      }
+      let apiValidationSummary: string | null = null;
+      let apiValidationFailed = false;
 
-      if (testCase.expectedResult) {
-        this.log(`验证预期结果: ${testCase.expectedResult}`);
-        const existingPlan = (testCase as any).result?.assertionPlan || (result as any).assertionPlan;
-        const { log, plan } = await this.verifyExpectedResult(testCase.expectedResult, existingPlan || undefined);
-        result.actualResult = log;
-        if (checkResultMatch(testCase.expectedResult, result.actualResult)) {
-          if (result.status !== 'failed') result.status = 'passed';
-          if (plan) result.assertionPlan = plan;
-          this.log('✓ 测试通过');
+      if (this.options.onlyApi) {
+        // 仅在 onlyApi 模式下收集并校验 API 请求，并据此决定用例结果
+        // 规则：
+        // - 若 testCase.validateApiUrls 未配置或为空，则不做任何 API 校验（视为“未配置 API 校验”）
+        // - 否则，仅对 validateApiUrls 中列出的 URL 做校验
+        const apiSchemas: Map<string, string> | null = (() => {
+          const apiRecords = (testCase as any).apiRecords as
+            | Record<string, { requestSchema?: string }>
+            | undefined;
+          const validateApiUrls = (testCase as any).validateApiUrls as string[] | undefined;
+
+          if (!Array.isArray(validateApiUrls) || validateApiUrls.length === 0) {
+            return null;
+          }
+          if (!apiRecords) return null;
+
+          const map = new Map<string, string>();
+          for (const url of validateApiUrls) {
+            const rec = apiRecords[url];
+            if (rec && typeof rec.requestSchema === 'string' && rec.requestSchema.trim()) {
+              map.set(url, rec.requestSchema);
+            }
+          }
+          return map.size > 0 ? map : null;
+        })();
+
+        if (apiSchemas && apiSchemas.size > 0) {
+          const apiUrls = Array.from(apiSchemas.keys());
+          this.log(`验证API请求（使用Zod schema）...`);
+          this.log(`本次将校验的 API 列表: ${apiUrls.join(', ')}`);
+
+          const apiValidationResult = await validateApiRequests(
+            this.networkInterceptor,
+            testCase.id,
+            apiSchemas
+          );
+          if (!apiValidationResult.success) {
+            result.status = 'failed';
+            result.error = `API请求验证失败: ${apiValidationResult.error}`;
+            apiValidationFailed = true;
+            apiValidationSummary = `API请求验证失败: ${apiValidationResult.error}。已尝试校验: ${apiUrls.join(
+              ', '
+            )}`;
+            this.log(chalk.red(`✗ API请求验证失败: ${apiValidationResult.error}`));
+          } else {
+            apiValidationSummary = `API请求验证通过。已校验: ${apiUrls.join(', ')}`;
+            this.log(chalk.green(`✓ API请求验证通过`));
+          }
         } else {
-          result.status = 'failed';
-          result.error = `预期结果不匹配。预期: ${testCase.expectedResult}, 实际: ${result.actualResult}`;
-          this.log('✗ 测试失败: 预期结果不匹配');
+          apiValidationSummary = null;
+        }
+
+        // 仅进行 API 校验：不再执行 expectedResult 的页面断言
+        if (apiValidationSummary) {
+          result.actualResult = apiValidationSummary;
+        } else if (!apiSchemas || apiSchemas.size === 0) {
+          result.actualResult = '未配置 API 请求 schema，未执行 API 校验';
+        }
+
+        if (!apiValidationFailed && result.status !== 'failed') {
+          result.status = 'passed';
+          this.log('✓ 测试通过（仅API验证）');
+        } else if (apiValidationFailed) {
+          this.log('✗ 测试失败（仅API验证）');
         }
       } else {
-        if (result.status !== 'failed') {
-          result.status = 'passed';
-          result.actualResult = '所有步骤执行成功';
+        if (testCase.expectedResult) {
+          this.log(`验证预期结果: ${testCase.expectedResult}`);
+          const existingPlan = (testCase as any).result?.assertionPlan || (result as any).assertionPlan;
+          const { log, plan } = await this.verifyExpectedResult(testCase.expectedResult, existingPlan || undefined);
+          result.actualResult = log;
+          if (checkResultMatch(testCase.expectedResult, result.actualResult)) {
+            if (result.status !== 'failed') result.status = 'passed';
+            if (plan) result.assertionPlan = plan;
+            this.log('✓ 测试通过');
+          } else {
+            result.status = 'failed';
+            result.error = `预期结果不匹配。预期: ${testCase.expectedResult}, 实际: ${result.actualResult}`;
+            this.log('✗ 测试失败: 预期结果不匹配');
+          }
+        } else {
+          if (result.status !== 'failed') {
+            result.status = 'passed';
+            result.actualResult = '所有步骤执行成功';
+          }
+          this.log('✓ 测试通过（无预期结果验证）');
         }
-        this.log('✓ 测试通过（无预期结果验证）');
       }
     } catch (error: any) {
       result.status = 'failed';
@@ -577,6 +637,17 @@ export class TestExecutor {
 
   getPage(): any {
     return this.page;
+  }
+
+  /**
+   * 获取当前执行过程中的网络请求/响应快照（仅当已启用 NetworkInterceptor 时有效）
+   */
+  getNetworkSnapshot(): { requests: NetworkRequest[]; responses: NetworkResponse[] } | null {
+    if (!this.networkInterceptor) return null;
+    return {
+      requests: this.networkInterceptor.getRecordedRequests(),
+      responses: this.networkInterceptor.getRecordedResponses()
+    };
   }
 
   async close(): Promise<void> {

@@ -23,13 +23,34 @@ export function checkResultMatch(expected: string, actual: string): boolean {
     return false;
   }
 
-  // 2. 若预期里本身包含“成功/通过/显示”等正向关键词，
-  //    则要求实际结果中也能看到同类成功关键词
-  if (successKeywords.some(keyword => expectedLower.includes(keyword.toLowerCase()))) {
-    return successKeywords.some(keyword => actualLower.includes(keyword.toLowerCase()));
+  // 2. 若预期中包含 URL，只要实际结果中也包含这些 URL，即认为匹配（前提是没有失败关键词）
+  const urlRegex = /(https?:\/\/[^\s"']+)/gi;
+  const expectedUrls: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = urlRegex.exec(safeExpected)) !== null) {
+    expectedUrls.push(match[1] || match[0]);
+  }
+  if (expectedUrls.length > 0) {
+    const allUrlsMatched = expectedUrls.every(url =>
+      actualLower.includes(url.toLowerCase())
+    );
+    if (allUrlsMatched) {
+      return true;
+    }
   }
 
-  // 3. 优先匹配预期中带引号的“关键文案”
+  // 3. 若预期里本身包含“成功/通过/显示”等正向关键词，
+  //    则希望实际结果中也能看到同类成功关键词；若没有，则继续用后续规则判断，不直接判失败
+  if (successKeywords.some(keyword => expectedLower.includes(keyword.toLowerCase()))) {
+    const hasSuccessInActual = successKeywords.some(keyword =>
+      actualLower.includes(keyword.toLowerCase())
+    );
+    if (hasSuccessInActual) {
+      return true;
+    }
+  }
+
+  // 4. 优先匹配预期中带引号的“关键文案”
   //    例如：页面里有“创建主机”按钮；或包含 '创建主机' 这样的片段
   const quotedTokens: string[] = [];
   const quoteRegex = /[“"']([^”"']+)[”"']/g;
@@ -45,7 +66,7 @@ export function checkResultMatch(expected: string, actual: string): boolean {
     if (allQuotedMatched) return true;
   }
 
-  // 4. 其次，对中文用例：提取预期中的连续中文片段（长度>=2），
+  // 5. 其次，对中文用例：提取预期中的连续中文片段（长度>=2），
   //    只要有一个重要中文片段出现在实际结果中即可认为基本匹配。
   const chineseTokens = safeExpected.match(/[\u4e00-\u9fa5]{2,}/g) || [];
   if (chineseTokens.length > 0) {
@@ -53,7 +74,7 @@ export function checkResultMatch(expected: string, actual: string): boolean {
     if (hasChineseMatch) return true;
   }
 
-  // 5. 兜底逻辑：英文/混合场景，尝试整体包含或按空格拆分匹配
+  // 6. 兜底逻辑：英文/混合场景，尝试整体包含或按空格拆分匹配
   if (actualLower.includes(expectedLower)) return true;
 
   const expectedWords = expectedLower.split(/\s+/).filter(Boolean);

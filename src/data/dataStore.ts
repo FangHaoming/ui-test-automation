@@ -6,7 +6,7 @@ import { join, basename, extname, resolve } from 'path';
 import { readFile, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { ensureDir } from '../utils/fsUtils.js';
-import { parseTestCases } from './excelParser.js';
+import { parseTestCases, getTestCaseApiMapping } from './excelParser.js';
 import type { TestCase } from './excelParser.js';
 import type { TestResult, TestStatistics } from '../executor/testExecutor.js';
 import type { NetworkRequest, NetworkResponse } from '../utils/networkInterceptor.js';
@@ -35,7 +35,7 @@ export interface TestResultJson {
   log?: string;
 }
 
-/** 可 JSON 序列化的测试用例（apiRequestSchemas 为普通对象） */
+  /** 可 JSON 序列化的测试用例 */
 export interface TestCaseJson {
   id: string;
   name: string;
@@ -43,9 +43,12 @@ export interface TestCaseJson {
   steps: string[];
   expectedResult: string;
   description: string;
-  /** 是否在录制模式中对该用例进行录制（来自 Excel 第10列“是否录制”） */
-  recordEnabled?: boolean;
-  apiRequestSchemas?: Record<string, string>;
+  /** 该用例关注的 API URL 列表（来自 Excel 的「API URL」列），用于录制/回放时按用例分组记录网络请求 */
+  apiUrls?: string[];
+  /** 该用例在执行阶段「要校验」的 API URL 列表；若未配置，则默认对所有有 requestSchema 的 URL 做校验 */
+  validateApiUrls?: string[];
+  /** 该用例对应的 API 记录：API URL -> 请求/响应记录 */
+  apiRecords?: Record<string, ApiRecordItem>;
   /** 该用例最近一次运行结果；result.steps 仅存 actResult 数组 */
   result?: TestResultJson;
 }
@@ -82,8 +85,10 @@ export interface DataFile {
   testCases: TestCaseJson[];
   statistics?: TestStatistics;
   lastRun?: string;
-  /** 记录模式写入：测试用例ID -> API URL -> 请求/响应记录 */
+  /** @deprecated 旧版本：记录模式写入的 API 记录（按 测试用例ID -> API URL 分组）；现已迁移到每个 testCase.apiRecords */
   apiRecords?: Record<string, Record<string, ApiRecordItem>>;
+  /** @deprecated 旧版本：保存 API URL 映射；保留用于兼容，但逻辑上优先使用每个 testCase.apiUrls */
+  apiUrlMapping?: Record<string, string[]>;
 }
 
 const DATA_DIR = 'data';
@@ -111,26 +116,7 @@ function testCaseToJson(tc: TestCase): TestCaseJson {
     url: tc.url,
     steps: tc.steps,
     expectedResult: tc.expectedResult,
-    description: tc.description,
-    recordEnabled: tc.recordEnabled,
-    apiRequestSchemas: tc.apiRequestSchemas && tc.apiRequestSchemas.size > 0
-      ? Object.fromEntries(tc.apiRequestSchemas)
-      : undefined
-  };
-}
-
-function testCaseFromJson(json: TestCaseJson): TestCase {
-  return {
-    id: json.id,
-    name: json.name,
-    url: json.url,
-    steps: json.steps,
-    expectedResult: json.expectedResult,
-    description: json.description,
-    apiRequestSchemas: json.apiRequestSchemas && Object.keys(json.apiRequestSchemas).length > 0
-      ? new Map(Object.entries(json.apiRequestSchemas))
-      : undefined,
-    recordEnabled: json.recordEnabled
+    description: tc.description
   };
 }
 
@@ -148,11 +134,19 @@ export async function loadTestCasesFromExcelAndSave(excelPath: string): Promise<
   await ensureDataDir();
 
   const sourceFile = basename(excelPath);
+  const mappingMap = await getTestCaseApiMapping(excelPath);
+
+  // 先根据 Excel 解析得到基础用例，并把「API URL」列写进各自的 testCase.apiUrls
   let data: DataFile = {
     sourceFile,
-    testCases: testCases.map(tc => testCaseToJson(tc))
+    testCases: testCases.map(tc => {
+      const base = testCaseToJson(tc);
+      const urls = mappingMap.get(tc.id);
+      return urls && urls.length > 0 ? { ...base, apiUrls: urls } : base;
+    })
   };
-  // 若已有 data 文件，保留每个用例的 result、apiRecords
+
+  // 若已有 data 文件，保留每个用例的 result、apiRecords 等历史信息
   if (existsSync(dataPath)) {
     try {
       const existing = await loadDataFile(dataPath);
@@ -161,6 +155,8 @@ export async function loadTestCasesFromExcelAndSave(excelPath: string): Promise<
         ...existing,
         sourceFile,
         testCases: data.testCases.map(tc => ({
+          // 以最新 Excel 为主，同步 API URL；但保留历史 result
+          ...(existingById.get(tc.id) || {}),
           ...tc,
           result: existingById.get(tc.id)?.result
         }))
@@ -185,6 +181,7 @@ export async function mergeExcelToDataFile(
   dataPathOrUndefined?: string
 ): Promise<{ mergedCount: number; skippedCount: number; dataPath: string }> {
   const testCases = await parseTestCases(excelPath);
+  const mappingMap = await getTestCaseApiMapping(excelPath);
   const dataPath = dataPathOrUndefined
     ? resolve(process.cwd(), dataPathOrUndefined)
     : getDataPath(excelPath);
@@ -209,7 +206,13 @@ export async function mergeExcelToDataFile(
       continue;
     }
     data.testCases = data.testCases || [];
-    data.testCases.push(testCaseToJson(tc));
+    const base = testCaseToJson(tc);
+    const urls = mappingMap.get(tc.id);
+    data.testCases.push(
+      urls && urls.length > 0
+        ? { ...base, apiUrls: urls }
+        : base
+    );
     existingIds.add(tc.id);
     mergedCount += 1;
   }
@@ -335,8 +338,7 @@ export async function loadTestCasesFromDataFile(dataPath: string): Promise<{
 }> {
   const resolvedPath = resolve(process.cwd(), dataPath);
   const data = await loadDataFile(resolvedPath);
-  const testCases = (data.testCases || []).map(testCaseFromJson);
-  return { testCases, dataPath: resolvedPath };
+  return { testCases: data.testCases, dataPath: resolvedPath };
 }
 
 /**
@@ -373,8 +375,8 @@ export async function ensureDataFileFromExcel(excelPath: string): Promise<{
 }> {
   const dataPath = getDataPath(excelPath);
   if (existsSync(dataPath)) {
-    const data = await loadDataFile(dataPath);
-    const testCases = (data.testCases || []).map(testCaseFromJson);
+    // 直接复用从 JSON 加载测试用例的逻辑（包含 apiRecords 等扩展字段）
+    const { testCases } = await loadTestCasesFromDataFile(dataPath);
     return { testCases, dataPath };
   }
   return loadTestCasesFromExcelAndSave(excelPath);
@@ -389,11 +391,30 @@ export async function saveApiRecords(
   testCaseResponseMap: Map<string, Map<string, NetworkResponse>>,
   generateRequestSchema: (body: unknown) => string
 ): Promise<void> {
-  const data = existsSync(dataPath) ? await loadDataFile(dataPath) : { sourceFile: '', testCases: [] };
-  const apiRecords: DataFile['apiRecords'] = data.apiRecords || {};
+  const data: DataFile = existsSync(dataPath) ? await loadDataFile(dataPath) : { sourceFile: '', testCases: [] };
 
+  // 确保 testCases 数组存在
+  data.testCases = data.testCases || [];
+  const caseById = new Map<string, TestCaseJson>(data.testCases.map(tc => [tc.id, tc]));
+
+  // 1) 先处理请求体，生成 requestSchema，写入到对应用例的 apiRecords[apiUrl].requestSchema
   testCaseRequestMap.forEach((reqMap, testCaseId) => {
-    if (!apiRecords[testCaseId]) apiRecords[testCaseId] = {};
+    // 若 data 中还没有此用例的壳子，则补一个最小壳，方便后续手动编辑
+    if (!caseById.has(testCaseId)) {
+      const shell: TestCaseJson = {
+        id: testCaseId,
+        name: testCaseId,
+        url: '',
+        steps: [],
+        expectedResult: '',
+        description: ''
+      };
+      data.testCases.push(shell);
+      caseById.set(testCaseId, shell);
+    }
+    const tc = caseById.get(testCaseId)!;
+    tc.apiRecords = tc.apiRecords || {};
+
     reqMap.forEach((req, apiUrl) => {
       let requestSchema = '';
       try {
@@ -409,16 +430,32 @@ export async function saveApiRecords(
       } catch {
         requestSchema = JSON.stringify({ method: req.method, headers: req.headers, body: req.postData }, null, 2);
       }
-      if (!apiRecords[testCaseId][apiUrl]) apiRecords[testCaseId][apiUrl] = {};
-      apiRecords[testCaseId][apiUrl].requestSchema = requestSchema;
+
+      if (!tc.apiRecords![apiUrl]) tc.apiRecords![apiUrl] = {};
+      tc.apiRecords![apiUrl].requestSchema = requestSchema;
     });
   });
 
+  // 2) 再写入响应快照到对应用例的 apiRecords[apiUrl].response
   testCaseResponseMap.forEach((resMap, testCaseId) => {
-    if (!apiRecords[testCaseId]) apiRecords[testCaseId] = {};
+    if (!caseById.has(testCaseId)) {
+      const shell: TestCaseJson = {
+        id: testCaseId,
+        name: testCaseId,
+        url: '',
+        steps: [],
+        expectedResult: '',
+        description: ''
+      };
+      data.testCases.push(shell);
+      caseById.set(testCaseId, shell);
+    }
+    const tc = caseById.get(testCaseId)!;
+    tc.apiRecords = tc.apiRecords || {};
+
     resMap.forEach((res, apiUrl) => {
-      if (!apiRecords[testCaseId][apiUrl]) apiRecords[testCaseId][apiUrl] = {};
-      apiRecords[testCaseId][apiUrl].response = {
+      if (!tc.apiRecords![apiUrl]) tc.apiRecords![apiUrl] = {};
+      tc.apiRecords![apiUrl].response = {
         url: res.url,
         status: res.status,
         headers: res.headers || {},
@@ -427,6 +464,5 @@ export async function saveApiRecords(
     });
   });
 
-  data.apiRecords = apiRecords;
   await saveDataFile(dataPath, data);
 }
