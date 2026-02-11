@@ -9,17 +9,25 @@
     "start": "tsx src/index.ts",
     "start:compiled": "node dist/index.js",
     "test": "tsx src/index.ts",
-    "test:local": "tsx src/index.ts --excel excel/test-cases-template.xlsx --headless false",
-    "test:record": "tsx src/index.ts --excel excel/test-cases-template.xlsx --headless false --record-from-excel",
+    "execute:excel": "tsx src/index.ts --excel excel/test-cases-template.xlsx --headless false --case-id TC-001",
+    "execute:json:tc-004": "tsx src/index.ts --data data/test-cases-template.json --headless false --case-id TC-004",
+    "execute:json": "tsx src/index.ts --data data/test-cases-template.json --headless false",
+    "execute:json:failed": "tsx src/index.ts --data data/test-cases-template.json --headless false --only-failed",
+    "excel:merge": "tsx src/index.ts --excel excel/test-cases-template.xlsx --merge-to-json",
+    "excel:merge:json": "tsx src/index.ts --excel excel/test-cases-template.xlsx --data data/test-cases-template.json --merge-to-json",
+    "record:json:tc-004": "tsx src/index.ts --data data/test-cases-template.json --headless false --record --case-id TC-004",
+    "record:url": "tsx src/index.ts --record --headless false",
+    "delete:case": "tsx src/index.ts --data data/test-cases-template.json --delete-case",
     "dev": "tsx watch src/index.ts",
     "llm:setup": "bash scripts/setup-ollama.sh",
     "debug": "DEBUG=true tsx src/index.ts --interactive --debug --headless false",
-    "stop-recording": "touch records/.stop-recording"
+    "stop-recording": "mkdir -p records && touch records/.stop-recording"
   },
   "keywords": [
     "ui-testing",
     "automation",
     "stagehand",
+    "playwright",
     "excel"
   ],
   "author": "",

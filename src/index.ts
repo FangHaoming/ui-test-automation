@@ -2,6 +2,9 @@ import 'dotenv/config';
 import { createTemplateWithApiConfig, parseApiEndpoints } from './data/excelParser.js';
 import {
   loadTestCasesFromExcelAndSave,
+  loadTestCasesFromDataFile,
+  mergeExcelToDataFile,
+  deleteTestCaseFromDataFile,
   saveTestResults,
   loadDataFile,
   ensureDataFileFromExcel,
@@ -24,12 +27,13 @@ import { ensureDir } from './utils/fsUtils.js';
  */
 interface CommandLineOptions {
   excelFile: string | null;
+  /** 指定 data 目录下的 JSON 文件作为用例来源（与 --excel 二选一） */
+  dataFile: string | null;
   outputDir: string;
   headless: boolean;
   debug: boolean;
   createTemplate: boolean;
   record: boolean;
-  recordFromExcel: boolean;
   recordUrl: string | null;
   recordOutput: string;
   apiConfig: string | null;
@@ -37,6 +41,18 @@ interface CommandLineOptions {
   interactiveUrl: string | null;
   /** 最大并发执行的用例数量（浏览器实例数），<=0 或未设置时表示不限制 */
   maxConcurrency?: number;
+  /** 仅执行指定测试用例 ID（--case-id <id>），不指定则执行全部 */
+  caseId: string | null;
+  /** 记录模式下当前正在录制的用例 ID（内部传递用） */
+  recordTestCaseId?: string;
+  /** 记录模式使用的 data JSON 路径（--data 时传入，用于写入 result.steps/断言） */
+  recordDataPath?: string;
+  /** 将 Excel 合并到 JSON（--merge-to-json），已存在同 ID 的用例则跳过 */
+  mergeToJson: boolean;
+  /** 仅执行 result.status 为 failed 的用例（--only-failed，仅 --data 时有效） */
+  onlyFailed: boolean;
+  /** 从 JSON 中删除指定测试用例并删除对应 trace（--delete-case <id>，需配合 --data） */
+  deleteCase: string | null;
 }
 
 /**
@@ -44,22 +60,27 @@ interface CommandLineOptions {
  */
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  
+
   // 解析命令行参数
   const options: CommandLineOptions = {
     excelFile: null,
+    dataFile: null,
     outputDir: './reports',
     headless: true,
     debug: false,
     createTemplate: false,
     record: false,
-    recordFromExcel: false,
     recordUrl: null,
     recordOutput: './records',
     apiConfig: null,
     interactive: false,
     interactiveUrl: null,
-    maxConcurrency: undefined
+    maxConcurrency: undefined,
+    caseId: null,
+    recordTestCaseId: undefined,
+    mergeToJson: false,
+    onlyFailed: false,
+    deleteCase: null
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -67,6 +88,10 @@ async function main(): Promise<void> {
       case '--excel':
       case '-e':
         options.excelFile = args[++i];
+        break;
+      case '--data':
+      case '-j':
+        options.dataFile = args[++i];
         break;
       case '--output':
       case '-o':
@@ -92,11 +117,20 @@ async function main(): Promise<void> {
           options.recordUrl = args[++i];
         }
         break;
-      case '--record-from-excel':
-        options.recordFromExcel = true;
-        break;
       case '--record-output':
         options.recordOutput = args[++i];
+        break;
+      case '--case-id':
+        options.caseId = args[++i] ?? null;
+        break;
+      case '--merge-to-json':
+        options.mergeToJson = true;
+        break;
+      case '--only-failed':
+        options.onlyFailed = true;
+        break;
+      case '--delete-case':
+        options.deleteCase = args[++i] ?? null;
         break;
       case '--api-config':
       case '--api':
@@ -125,10 +159,56 @@ async function main(): Promise<void> {
         printHelp();
         return;
       default:
-        if (!options.excelFile && !args[i].startsWith('-')) {
-          options.excelFile = args[i];
+        if (!args[i].startsWith('-')) {
+          const looksLikeUrl = args[i].startsWith('http://') || args[i].startsWith('https://');
+          if (options.record && !options.recordUrl && looksLikeUrl) {
+            options.recordUrl = args[i];
+          } else if (!options.excelFile && !options.dataFile) {
+            options.excelFile = args[i];
+          }
         }
     }
+  }
+
+  // 如果是从 JSON 删除指定测试用例并删除对应 trace
+  if (options.deleteCase && options.dataFile) {
+    const dataPath = resolve(process.cwd(), options.dataFile);
+    if (!existsSync(dataPath)) {
+      console.error(chalk.red(`错误: 文件不存在: ${options.dataFile}`));
+      process.exit(1);
+    }
+    const { deleted } = await deleteTestCaseFromDataFile(options.dataFile, options.deleteCase);
+    if (!deleted) {
+      console.warn(chalk.yellow(`未在 JSON 中找到用例 ID "${options.deleteCase}"，未做任何修改`));
+      return;
+    }
+    const tracePath = join(process.cwd(), 'traces', `trace-${options.deleteCase}.zip`);
+    if (existsSync(tracePath)) {
+      try {
+        unlinkSync(tracePath);
+        console.log(chalk.green(`✓ 已删除 trace: ${tracePath}`));
+      } catch (e: any) {
+        console.warn(chalk.yellow(`删除 trace 失败: ${e?.message || e}`));
+      }
+    }
+    console.log(chalk.green(`✓ 已从 ${options.dataFile} 中删除用例 ${options.deleteCase}\n`));
+    return;
+  }
+
+  // 如果是 Excel 合并到 JSON（已存在同 ID 则跳过）
+  if (options.mergeToJson && options.excelFile) {
+    if (!existsSync(options.excelFile)) {
+      console.error(chalk.red(`错误: 文件不存在: ${options.excelFile}`));
+      process.exit(1);
+    }
+    const { mergedCount, skippedCount, dataPath } = await mergeExcelToDataFile(
+      options.excelFile,
+      options.dataFile ?? undefined
+    );
+    console.log(chalk.cyan('Excel 合并到 JSON'));
+    console.log(chalk.green(`✓ 新增: ${mergedCount}，跳过（已存在同 ID）: ${skippedCount}`));
+    console.log(chalk.green(`  输出: ${dataPath}\n`));
+    return;
   }
 
   // 如果只是创建模板
@@ -149,9 +229,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  // 如果是从 Excel 启动记录模式
-  if (options.recordFromExcel) {
-    await runRecordFromExcel(options);
+  // 如果是按指定测试用例 ID 启动记录模式（--record --case-id <id>）
+  if (options.record && options.caseId && (options.excelFile || options.dataFile)) {
+    await runRecordById(options);
     return;
   }
 
@@ -161,11 +241,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  // 检查Excel文件
-  if (!options.excelFile) {
-    console.error(chalk.red('错误: 请指定Excel测试用例文件'));
+  // 检查用例来源：Excel 或 data 下的 JSON 二选一
+  if (!options.excelFile && !options.dataFile) {
+    console.error(chalk.red('错误: 请指定 Excel 文件 (--excel) 或 data 下的 JSON 文件 (--data)'));
     console.log(chalk.yellow('\n使用方法:'));
-    console.log('  node dist/index.js --excel <文件路径>');
+    console.log('  node dist/index.js --excel <Excel路径>');
+    console.log('  node dist/index.js --data data/<json文件名>  # 直接使用 data 下的 JSON');
     console.log('  node dist/index.js --template  # 创建模板文件');
     console.log('\n更多选项:');
     console.log('  --output, -o <目录>    指定报告输出目录 (默认: ./reports)');
@@ -175,22 +256,51 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!existsSync(options.excelFile)) {
-    console.error(chalk.red(`错误: 文件不存在: ${options.excelFile}`));
-    return;
+  let testCases: Awaited<ReturnType<typeof loadTestCasesFromExcelAndSave>>['testCases'];
+  let dataPath: string;
+
+  if (options.dataFile) {
+    const resolvedData = resolve(process.cwd(), options.dataFile);
+    if (!existsSync(resolvedData)) {
+      console.error(chalk.red(`错误: 文件不存在: ${options.dataFile}`));
+      return;
+    }
+    const loaded = await loadTestCasesFromDataFile(options.dataFile);
+    testCases = loaded.testCases;
+    dataPath = loaded.dataPath;
+  } else {
+    if (!existsSync(options.excelFile!)) {
+      console.error(chalk.red(`错误: 文件不存在: ${options.excelFile}`));
+      return;
+    }
+    const loaded = await loadTestCasesFromExcelAndSave(options.excelFile!);
+    testCases = loaded.testCases;
+    dataPath = loaded.dataPath;
+  }
+
+  // 若指定了 --case-id，仅保留该 ID 的用例
+  if (options.caseId) {
+    const matched = testCases.filter(tc => tc.id === options.caseId);
+    if (matched.length === 0) {
+      console.error(chalk.red(`错误: 未找到测试用例 ID "${options.caseId}"，请检查用例文件中的用例ID`));
+      process.exit(1);
+    }
+    testCases = matched;
   }
 
   try {
     console.log(chalk.cyan('='.repeat(80)));
     console.log(chalk.bold.cyan('UI自动化测试工具 - 基于Stagehand'));
     console.log(chalk.cyan('='.repeat(80)));
-    console.log(`\n测试用例文件: ${options.excelFile}`);
+    console.log(`\n测试用例来源: ${options.dataFile ?? options.excelFile}`);
     console.log(`输出目录: ${options.outputDir}\n`);
 
-    // 解析 Excel 并保存为 data 目录下的 JSON
-    console.log('正在解析 Excel 并保存为 JSON...');
-    const { testCases, dataPath } = await loadTestCasesFromExcelAndSave(options.excelFile);
-    console.log(chalk.green(`✓ 成功解析 ${testCases.length} 个测试用例，已保存到 ${dataPath}\n`));
+    if (!options.dataFile) {
+      console.log('正在解析 Excel 并保存为 JSON...');
+    } else {
+      console.log('正在从 JSON 加载测试用例...');
+    }
+    console.log(chalk.green(`✓ 成功加载 ${testCases.length} 个测试用例，数据文件: ${dataPath}\n`));
 
     if (testCases.length === 0) {
       console.warn(chalk.yellow('警告: 未找到任何测试用例'));
@@ -228,6 +338,35 @@ async function main(): Promise<void> {
         stepHistory[tc.id] = steps as ActResultJson[];
       }
     });
+
+    // 从 JSON 执行时：无 expectedResult 的跳过；同时无 steps 且 result.steps 为空的也跳过；--only-failed 时仅保留 result.status 为 failed 的用例
+    if (options.dataFile) {
+      const beforeCount = testCases.length;
+      const dataById = new Map(data.testCases.map(c => [c.id, c]));
+      testCases = testCases.filter(tc => {
+        const fromData = dataById.get(tc.id);
+        if (options.onlyFailed) {
+          if (fromData?.result?.status !== 'failed') return false;
+        }
+        const hasExpected = !!(tc.expectedResult && String(tc.expectedResult).trim().length > 0);
+        if (!hasExpected) return false;
+        const hasSteps = !!(tc.steps && tc.steps.length > 0);
+        const hasResultSteps = !!(fromData?.result?.steps && fromData.result.steps.length > 0);
+        return hasSteps || hasResultSteps;
+      });
+      const skipped = beforeCount - testCases.length;
+      if (skipped > 0) {
+        console.log(chalk.yellow(`  已跳过 ${skipped} 个${options.onlyFailed ? '（仅执行 failed）' : ''}无预期结果或同时无步骤且无录制步骤的用例\n`));
+      }
+      if (options.onlyFailed && testCases.length > 0) {
+        console.log(chalk.cyan(`  仅执行 result.status 为 failed 的用例，共 ${testCases.length} 个\n`));
+      }
+    }
+
+    if (testCases.length === 0) {
+      console.warn(chalk.yellow('警告: 无可用测试用例（全部被跳过或未找到）'));
+      return;
+    }
 
     // 并发执行测试用例：为每个用例创建独立的 TestExecutor / 浏览器实例
     // 支持通过 --max-concurrency 控制最大并发数；未设置或 <=0 时默认 5
@@ -349,13 +488,27 @@ async function runRecordMode(options: CommandLineOptions): Promise<void> {
     console.log(chalk.cyan('='.repeat(80)));
     console.log('');
 
+    // 开始记录前确保 records 目录存在，并删掉上次可能遗留的 .stop-recording
+    const recordsDir = join(process.cwd(), 'records');
+    await ensureDir(recordsDir);
+    const stopFile = resolve(recordsDir, '.stop-recording');
+    if (existsSync(stopFile)) {
+      try {
+        unlinkSync(stopFile);
+      } catch {
+        // 忽略删除失败
+      }
+    }
+
     // 记录模式需要可见浏览器供用户操作，默认不使用无头模式
     const recorder = new RecorderMode({
       url: options.recordUrl || undefined,
       excelFile: options.apiConfig || undefined,
+      dataPath: options.recordDataPath,
       outputFile: options.recordOutput,
       headless: false,
-      debug: options.debug
+      debug: options.debug,
+      testCaseId: options.recordTestCaseId
     });
 
     // 处理 Ctrl+C：先保存再退出，避免异步未完成就退出
@@ -372,7 +525,6 @@ async function runRecordMode(options: CommandLineOptions): Promise<void> {
 
     await recorder.start();
 
-    const stopFile = resolve(process.cwd(), 'records', '.stop-recording');
     console.log(chalk.yellow('记录模式运行中，按 Ctrl+C 停止'));
     console.log(chalk.cyan('  若需完整 trace（含截图），请用另一终端执行: touch records/.stop-recording'));
     console.log('');
@@ -383,7 +535,7 @@ async function runRecordMode(options: CommandLineOptions): Promise<void> {
         clearInterval(t);
         try {
           if (existsSync(stopFile)) unlinkSync(stopFile);
-        } catch {}
+        } catch { }
         console.log(chalk.yellow('\n检测到 records/.stop-recording，正在保存记录...'));
         try {
           await recorder.stop();
@@ -402,29 +554,53 @@ async function runRecordMode(options: CommandLineOptions): Promise<void> {
 }
 
 /**
- * 根据 Excel 中标记的用例启动记录模式
- * 使用同一份 Excel 作为测试用例与 API 配置来源
+ * 根据指定测试用例 ID 启动记录模式
+ * 需配合 --excel 或 --data 使用，从用例文件中查找对应 ID 的用例并启动录制。
  */
-async function runRecordFromExcel(options: CommandLineOptions): Promise<void> {
+async function runRecordById(options: CommandLineOptions): Promise<void> {
   try {
-    if (!options.excelFile) {
-      console.error(chalk.red('错误: 使用 --record-from-excel 时必须指定 --excel <测试用例文件>'));
+    if (!options.caseId) {
+      console.error(chalk.red('错误: 录制指定用例时需指定 --case-id <用例ID>，例如 --record --case-id TC-001'));
+      process.exit(1);
+    }
+    if (!options.excelFile && !options.dataFile) {
+      console.error(chalk.red('错误: 使用 --record --case-id 时必须指定 --excel <测试用例文件> 或 --data <JSON文件>'));
       process.exit(1);
     }
 
+    let testCases: Awaited<ReturnType<typeof loadTestCasesFromExcelAndSave>>['testCases'];
+    let dataPath: string;
     const excelPath = options.excelFile;
-    const { testCases } = await ensureDataFileFromExcel(excelPath);
-    const toRecord = testCases.filter(tc => tc.recordEnabled);
 
-    if (toRecord.length === 0) {
-      console.warn(chalk.yellow('警告: Excel 中未找到标记为“是否录制”的用例（第10列“是否录制”）'));
-      return;
+    if (options.dataFile) {
+      const resolvedData = resolve(process.cwd(), options.dataFile);
+      if (!existsSync(resolvedData)) {
+        console.error(chalk.red(`错误: 文件不存在: ${options.dataFile}`));
+        process.exit(1);
+      }
+      const loaded = await loadTestCasesFromDataFile(options.dataFile);
+      testCases = loaded.testCases;
+      dataPath = loaded.dataPath;
+    } else {
+      if (!existsSync(options.excelFile!)) {
+        console.error(chalk.red(`错误: 文件不存在: ${options.excelFile}`));
+        process.exit(1);
+      }
+      console.log(chalk.cyan('正在加载测试用例...'));
+      const loaded = await loadTestCasesFromExcelAndSave(options.excelFile!);
+      testCases = loaded.testCases;
+      dataPath = loaded.dataPath;
+      console.log(chalk.green(`✓ 已同步到 ${dataPath}\n`));
     }
 
-    const target = toRecord[0];
+    const target = testCases.find(tc => tc.id === options.caseId);
+    if (!target) {
+      console.error(chalk.red(`错误: 未找到测试用例 ID "${options.caseId}"，请检查用例文件中的用例ID`));
+      process.exit(1);
+    }
 
     console.log(chalk.cyan('='.repeat(80)));
-    console.log(chalk.bold.cyan('从 Excel 启动操作记录模式'));
+    console.log(chalk.bold.cyan('按指定用例 ID 启动操作记录模式'));
     console.log(chalk.cyan('='.repeat(80)));
     console.log('');
     console.log(chalk.cyan(`将为用例 ${target.id} - ${target.name} 启动浏览器:`));
@@ -435,13 +611,14 @@ async function runRecordFromExcel(options: CommandLineOptions): Promise<void> {
       ...options,
       record: true,
       recordUrl: target.url,
-      // 使用同一份 Excel 作为 API 配置来源，便于记录 apiRecords
-      apiConfig: excelPath
+      recordTestCaseId: target.id,
+      recordDataPath: dataPath,
+      apiConfig: excelPath ?? options.apiConfig ?? null
     };
 
     await runRecordMode(recordOptions);
   } catch (error: any) {
-    console.error(chalk.red('\n✗ 记录模式（来自 Excel）执行失败:'), error);
+    console.error(chalk.red('\n✗ 记录模式（按用例ID）执行失败:'), error);
     console.error(error.stack);
     process.exit(1);
   }
@@ -453,24 +630,32 @@ ${chalk.bold.cyan('UI自动化测试工具 - 使用说明')}
 
 ${chalk.bold('基本用法:')}
   node dist/index.js --excel <测试用例文件>
+  node dist/index.js --data data/<json文件>   # 直接使用 data 下的 JSON，不读 Excel
   node dist/index.js --template  # 创建Excel模板
   node dist/index.js --record <URL>  # 启动操作记录模式
-  node dist/index.js --excel <测试用例文件> --record-from-excel  # 按Excel中“是否录制”列启动记录模式
+  node dist/index.js --excel <测试用例文件> --record --case-id <用例ID>  # 按指定测试用例ID启动记录模式
+  node dist/index.js --data data/<json> --record --case-id <用例ID>  # 从 JSON 指定用例录制
+  node dist/index.js --excel <Excel> --merge-to-json [--data <JSON>]  # Excel 合并到 JSON，同 ID 已存在则跳过
   node dist/index.js --interactive  # 启动交互式测试模式
 
 ${chalk.bold('命令行选项:')}
-  --excel, -e <文件>        Excel测试用例文件路径 (测试模式必需)
+  --excel, -e <文件>        Excel测试用例文件路径 (与 --data 二选一)
+  --data, -j <文件>         data 目录下的 JSON 文件路径 (与 --excel 二选一)
   --output, -o <目录>       报告输出目录 (默认: ./reports)
   --headless <true|false>   是否无头模式 (默认: true)
   --debug, -d              启用调试模式
   --max-concurrency <数值>  最大并发用例数/浏览器实例数 (默认: 5)
+  --case-id <用例ID>        仅执行指定测试用例ID（不指定则执行全部）
   --template, -t            创建Excel模板文件
   --record, -r <URL>        启动操作记录模式，URL 为可选初始地址
-  --record-output <目录>    记录模式：输出目录，生成 record-时间戳.json 与 record-时间戳.zip (默认: ./records)
-  --record-from-excel       根据Excel中“是否录制”列（第10列），按用例URL启动记录模式
+  --record-output <目录>    记录模式：输出目录，生成 record-test-case.json/record-url.json 及同名 .zip（新覆盖旧，默认: ./records）
+  --record --case-id <ID>   按指定测试用例ID启动记录模式（需配合 --excel 或 --data）
   --interactive, -i         启动交互式测试模式
   --interactive-url <URL>   交互模式：初始URL（可选）
   --api-config <文件>       API配置Excel文件（用于mock，测试和记录模式都支持）
+  --merge-to-json          将 Excel 解析结果合并到 JSON，JSON 中已存在同 ID 的用例则跳过；可配合 --data 指定目标 JSON
+  --only-failed             仅执行 result.status 为 failed 的用例（仅 --data 时有效）
+  --delete-case <用例ID>    从 JSON 中删除指定用例并删除 traces/trace-<id>.zip（需配合 --data）
   --help, -h                显示此帮助信息
 
 ${chalk.bold('Excel文件格式:')}
@@ -490,8 +675,22 @@ ${chalk.bold('示例:')}
   # 创建模板
   node dist/index.js --template
 
-  # 运行测试
+  # 运行测试（从 Excel）
   node dist/index.js --excel test-cases.xlsx
+
+  # 运行测试（从 data 下的 JSON）
+  node dist/index.js --data data/test-cases-template.json
+
+  # 仅运行指定用例ID
+  node dist/index.js --excel test-cases.xlsx --case-id TC-001
+  node dist/index.js --data data/test-cases-template.json --case-id TC-001
+
+  # Excel 合并到 JSON（同 ID 已存在则跳过）
+  node dist/index.js --excel test-cases.xlsx --merge-to-json
+  node dist/index.js --excel test-cases.xlsx --data data/test-cases.json --merge-to-json
+
+  # 从 JSON 删除指定用例及对应 trace
+  node dist/index.js --data data/test-cases-template.json --delete-case TC-004
 
   # 启动记录模式（手动操作浏览器，自动记录）
   node dist/index.js --record https://example.com

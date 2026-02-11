@@ -666,12 +666,16 @@ export class ActionRecorder {
    * 获取可供 stagehand.act / executeActionWithPlaywright 回放用的 ActionJson 列表
    */
   getActionsForAct(): ActionJson[] {
-    return this.actions.map((a): ActionJson => ({
-      selector: a.selector || (a.element?.id ? '#' + a.element.id : ''),
-      description: a.description,
-      method: a.method || (a.type === 'type' ? 'type' : a.type === 'select' ? 'select' : 'click'),
-      arguments: Array.isArray(a.arguments) ? a.arguments : (a.value != null ? [String(a.value)] : [])
-    })).filter(a => a.selector.length > 0);
+    return this.actions
+      .map((a): ActionJson => {
+        return {
+          selector: a.selector || '',
+          description: a.description,
+          method: a.method || (a.type === 'type' ? 'type' : a.type === 'select' ? 'select' : 'click'),
+          arguments: Array.isArray(a.arguments) ? a.arguments : (a.value != null ? [String(a.value)] : [])
+        };
+      })
+      .filter(a => a.selector.length > 0);
   }
 
   /**

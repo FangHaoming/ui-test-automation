@@ -2,7 +2,7 @@
  * 数据存储 - 将 Excel 解析结果存为 JSON 到 data 目录，并支持写入测试结果与记录
  */
 
-import { join, basename, extname } from 'path';
+import { join, basename, extname, resolve } from 'path';
 import { readFile, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { ensureDir } from '../utils/fsUtils.js';
@@ -175,6 +175,50 @@ export async function loadTestCasesFromExcelAndSave(excelPath: string): Promise<
 }
 
 /**
+ * 将 Excel 解析结果合并到指定 JSON：仅追加 JSON 中尚不存在的用例 ID，已存在的跳过。
+ * @param excelPath - Excel 文件路径
+ * @param dataPathOrUndefined - 目标 JSON 路径（可选）；不传则按 Excel 文件名推导到 data/<name>.json
+ * @returns 合并数量、跳过数量与数据文件路径
+ */
+export async function mergeExcelToDataFile(
+  excelPath: string,
+  dataPathOrUndefined?: string
+): Promise<{ mergedCount: number; skippedCount: number; dataPath: string }> {
+  const testCases = await parseTestCases(excelPath);
+  const dataPath = dataPathOrUndefined
+    ? resolve(process.cwd(), dataPathOrUndefined)
+    : getDataPath(excelPath);
+  await ensureDataDir();
+
+  const sourceFile = basename(excelPath);
+  let data: DataFile;
+
+  if (existsSync(dataPath)) {
+    data = await loadDataFile(dataPath);
+  } else {
+    data = { sourceFile, testCases: [] };
+  }
+
+  const existingIds = new Set((data.testCases || []).map(tc => tc.id));
+  let mergedCount = 0;
+  let skippedCount = 0;
+
+  for (const tc of testCases) {
+    if (existingIds.has(tc.id)) {
+      skippedCount += 1;
+      continue;
+    }
+    data.testCases = data.testCases || [];
+    data.testCases.push(testCaseToJson(tc));
+    existingIds.add(tc.id);
+    mergedCount += 1;
+  }
+
+  await writeFile(dataPath, JSON.stringify(data, null, 2), 'utf-8');
+  return { mergedCount, skippedCount, dataPath };
+}
+
+/**
  * 读取 data 文件
  */
 export async function loadDataFile(dataPath: string): Promise<DataFile> {
@@ -259,9 +303,14 @@ export async function saveTestResults(
         } as ActResultJson;
       })
       .filter((a): a is ActResultJson => !!a && Array.isArray(a.actions));
+
+    // 若本次执行未产生可持久化的 steps（如回放中途失败），保留原有的 result.steps，避免覆盖为空
+    const stepsToWrite =
+      steps.length > 0 ? steps : (prevResult?.steps?.length ? prevResult.steps : steps);
+
     const resultJson: TestResultJson = {
       status: r.status,
-      steps,
+      steps: stepsToWrite,
       actualResult: r.actualResult,
       error: r.error,
       startTime: r.startTime instanceof Date ? r.startTime.toISOString() : String(r.startTime),
@@ -274,6 +323,44 @@ export async function saveTestResults(
     return { ...tc, result: resultJson };
   });
   await saveDataFile(dataPath, data);
+}
+
+/**
+ * 从 data 目录下的 JSON 文件直接加载测试用例（不经过 Excel）
+ * @param dataPath - data 下的 JSON 路径，如 data/test-cases-template.json
+ */
+export async function loadTestCasesFromDataFile(dataPath: string): Promise<{
+  testCases: TestCase[];
+  dataPath: string;
+}> {
+  const resolvedPath = resolve(process.cwd(), dataPath);
+  const data = await loadDataFile(resolvedPath);
+  const testCases = (data.testCases || []).map(testCaseFromJson);
+  return { testCases, dataPath: resolvedPath };
+}
+
+/**
+ * 从 data JSON 中删除指定 ID 的测试用例并保存
+ * @param dataPath - data 下的 JSON 路径（相对或绝对）
+ * @param caseId - 要删除的用例 ID
+ * @returns 是否删除了用例
+ */
+export async function deleteTestCaseFromDataFile(
+  dataPath: string,
+  caseId: string
+): Promise<{ deleted: boolean }> {
+  const resolvedPath = resolve(process.cwd(), dataPath);
+  if (!existsSync(resolvedPath)) {
+    return { deleted: false };
+  }
+  const data = await loadDataFile(resolvedPath);
+  const before = (data.testCases || []).length;
+  data.testCases = (data.testCases || []).filter(tc => tc.id !== caseId);
+  const deleted = data.testCases.length < before;
+  if (deleted) {
+    await saveDataFile(resolvedPath, data);
+  }
+  return { deleted };
 }
 
 /**

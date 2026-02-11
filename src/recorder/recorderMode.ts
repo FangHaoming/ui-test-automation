@@ -4,12 +4,25 @@
 
 import 'dotenv/config';
 import { chromium } from '@playwright/test';
+import { Stagehand } from '@browserbasehq/stagehand';
 import { ActionRecorder, getRecorderInitScript, type RecordedAction } from './actionRecorder.js';
 import { NetworkInterceptor, type ApiEndpoint, type NetworkResponse, type NetworkRequest } from '../utils/networkInterceptor.js';
 import { parseApiEndpoints } from '../data/excelParser.js';
-import { ensureDataFileFromExcel, saveApiRecords, type ActionJson } from '../data/dataStore.js';
+import {
+  ensureDataFileFromExcel,
+  saveApiRecords,
+  loadDataFile,
+  saveDataFile,
+  type ActionJson,
+  type ActResultJson,
+  type TestResultJson
+} from '../data/dataStore.js';
 import { ensurePlaywrightBrowsersInstalled } from '../utils/browserChecker.js';
 import { generateZodSchemaCode } from '../utils/zodSchemaGenerator.js';
+import { checkApiKeys, buildStagehandConfig } from '../executor/llmConfig.js';
+import { verifyExpectedResultWithAI, type AssertionPlan } from '../ai/aiAssertionEngine.js';
+import { checkResultMatch } from '../executor/resultMatch.js';
+import { waitForPageLoadIfUrlChanged } from '../executor/pageLoadWait.js';
 import chalk from 'chalk';
 import { resolve, dirname, join } from 'path';
 import { writeFile } from 'fs/promises';
@@ -29,10 +42,14 @@ function formatRecordTimestamp(date: Date = new Date()): string {
 export interface RecorderOptions {
   url?: string;
   excelFile?: string; // 用于读取API endpoint配置
-  /** 输出目录或旧版“输出文件路径”（取目录部分）；记录文件名为 record-时间戳.json */
+  /** data JSON 路径（--data 时传入），用于写入 result.steps 与断言；与 excelFile 二选一或同时有 */
+  dataPath?: string;
+  /** 输出目录（取目录部分）；记录文件名为 record-test-case.json / record-url.json，新覆盖旧 */
   outputFile?: string;
   headless?: boolean;
   debug?: boolean;
+  /** 若按用例 ID 启动记录模式，则携带正在录制的用例 ID，便于在 stop 阶段写入 result.steps */
+  testCaseId?: string;
 }
 
 export class RecorderMode {
@@ -44,13 +61,13 @@ export class RecorderMode {
   private options: Required<RecorderOptions>;
   private apiEndpoints: ApiEndpoint[] = [];
   private dataPath: string = '';
-  /** 本次记录的时间戳，用于 record-{ts}.json 与 record-{ts}.zip */
   private recordTimestamp: string = '';
 
   constructor(options: RecorderOptions = {}) {
     this.options = {
       url: options.url || '',
       excelFile: options.excelFile || '',
+      dataPath: options.dataPath || '',
       outputFile: options.outputFile || './records',
       headless: options.headless !== false,
       debug: options.debug || false,
@@ -102,6 +119,10 @@ export class RecorderMode {
         console.warn(chalk.yellow(`警告: 无法读取API配置: ${error.message}`));
       }
     }
+    if (this.options.dataPath) {
+      this.dataPath = this.options.dataPath;
+      console.log(chalk.green(`✓ 数据文件: ${this.dataPath}`));
+    }
 
     await this.networkInterceptor.startIntercepting();
 
@@ -114,7 +135,8 @@ export class RecorderMode {
     }
     console.log('  - 按 Ctrl+C 停止记录并保存结果');
     const outDir = this.getRecordsOutDir();
-    console.log('  - 记录将保存到:', join(outDir, `record-${this.recordTimestamp}.json`), '及同名的 .zip trace');
+    const prefix = this.getRecordFilePrefix();
+    console.log('  - 记录将保存到:', join(outDir, `${prefix}.json`), '及同名的 .zip trace');
     console.log('');
   }
 
@@ -123,6 +145,11 @@ export class RecorderMode {
     if (!this.options.outputFile) return resolve(process.cwd(), 'records');
     const p = resolve(process.cwd(), this.options.outputFile);
     return this.options.outputFile.endsWith('.json') ? dirname(p) : p;
+  }
+
+  /** 记录文件名前缀：按用例录制为 record-test-case，按 URL 录制为 record-url */
+  private getRecordFilePrefix(): string {
+    return this.options.testCaseId ? 'record-test-case' : 'record-url';
   }
 
   /**
@@ -265,10 +292,10 @@ export class RecorderMode {
       mockConfigs: mockConfigs
     };
 
-    const ts = this.recordTimestamp || formatRecordTimestamp();
     const outDir = this.getRecordsOutDir();
-    const outputPath = join(outDir, `record-${ts}.json`);
-    const tracePath = join(outDir, `record-${ts}.zip`);
+    const prefix = this.getRecordFilePrefix();
+    const outputPath = join(outDir, `${prefix}.json`);
+    const tracePath = join(outDir, `${prefix}.zip`);
 
     const outputPathAbs = resolve(process.cwd(), outputPath);
     const tracePathAbs = resolve(process.cwd(), tracePath);
@@ -304,7 +331,7 @@ export class RecorderMode {
 
       // 生成mock配置文件（如果有关注的API）
       if (mockConfigs.length > 0) {
-        const mockConfigPath = join(outDir, `record-${ts}-mock-config.json`);
+        const mockConfigPath = join(outDir, `${prefix}-mock-config.json`);
         await writeFile(mockConfigPath, JSON.stringify(mockConfigs, null, 2), 'utf-8');
         console.log(chalk.green(`✓ Mock配置已保存到: ${mockConfigPath}`));
         console.log(chalk.cyan(`  已为 ${mockConfigs.length} 个API endpoint生成mock配置`));
@@ -322,10 +349,252 @@ export class RecorderMode {
       console.error(chalk.red(`保存失败: ${error.message}`));
     }
     
+    // 若当前是按用例 ID 启动的记录模式（携带 testCaseId 且已有 dataPath），则在记录结束后：
+    // 1. 使用 Stagehand 回放刚才录制的 actions；
+    // 2. 基于用例的 expectedResult 做一次断言；
+    // 3. 断言通过（或未配置预期结果）时，将录制的 actions 写入 data JSON 中对应用例的 result.steps。
+    if (actionsForAct.length > 0 && this.options.testCaseId && this.dataPath) {
+      await this.verifyAndPersistRecordedActions(actionsForAct).catch((error: any) => {
+        console.warn(
+          chalk.yellow(
+            `[记录断言] 在基于 expectedResult 做断言或写入 result.steps 时出错: ${error?.message || error}`
+          )
+        );
+      });
+    }
+
     if (this.context) await this.context.close().catch(() => {});
     if (this.browser) await this.browser.close().catch(() => {});
 
     console.log(chalk.green('✓ 记录模式已停止'));
+  }
+
+  /**
+   * 使用 Stagehand 回放录制的 actions 并基于 expectedResult 做断言；
+   * 只有断言通过时，才将 actions 写入 data JSON 中的 result.steps。
+   */
+  private async verifyAndPersistRecordedActions(actionsForAct: ActionJson[]): Promise<void> {
+    if (!this.options.testCaseId || !this.dataPath) {
+      return;
+    }
+
+    const testCaseId = this.options.testCaseId;
+
+    const data = await loadDataFile(this.dataPath);
+    const idx = data.testCases.findIndex(tc => tc.id === testCaseId);
+    if (idx === -1) {
+      console.warn(
+        chalk.yellow(
+          `[记录断言] 在数据文件 ${this.dataPath} 中未找到用例 ${testCaseId}，跳过断言与 result.steps 写入`
+        )
+      );
+      return;
+    }
+
+    const testCase = data.testCases[idx];
+    const expectedResult = (testCase.expectedResult || '').trim();
+
+    if (!expectedResult) {
+      console.log(
+        chalk.yellow(
+          `[记录断言] 用例 ${testCase.id} 未配置 expectedResult，跳过断言，直接写入录制的 actions 到 result.steps`
+        )
+      );
+      const noWaitInfo = actionsForAct.map(() => ({
+        pageLoadWaitAttempted: false,
+        pageLoadWaitTimedOut: false
+      }));
+      await this.writeRecordedStepsToDataFile(
+        data,
+        idx,
+        actionsForAct,
+        {
+          log: '录制模式：未配置预期结果，未执行断言',
+          plan: undefined
+        },
+        noWaitInfo
+      );
+      return;
+    }
+
+    console.log(
+      chalk.cyan(
+        `\n[记录断言] 正在为用例 ${testCase.id} 基于 expectedResult 执行一次验证，并在通过后写入 result.steps...`
+      )
+    );
+
+    checkApiKeys();
+    const { stagehandConfig, llmClient } = buildStagehandConfig({
+      debug: this.options.debug,
+      headless: false
+    });
+
+    const stagehand = new Stagehand(stagehandConfig as any);
+    try {
+      await stagehand.init();
+      const page = stagehand.context.pages()[0];
+
+      // 导航到测试 URL（复用与 TestExecutor 类似的 URL 处理逻辑）
+      let url = String(testCase.url || '').trim();
+      if (!url) {
+        throw new Error('测试URL为空，无法在录制后执行断言');
+      }
+      try {
+        new URL(url);
+      } catch {
+        const urlWithProtocol = url.startsWith('http') ? url : `https://${url}`;
+        try {
+          new URL(urlWithProtocol);
+          url = urlWithProtocol;
+        } catch {
+          throw new Error(`无效的URL格式: ${url}`);
+        }
+      }
+
+      console.log(chalk.cyan(`[记录断言] 导航到: ${url}`));
+      await page.goto(url);
+      console.log(chalk.green('[记录断言] 页面加载完成，开始回放录制的操作...'));
+
+      // 每个 action 回放后单独记录 pageLoadWaitAttempted / pageLoadWaitTimedOut
+      const perActionWait: { pageLoadWaitAttempted: boolean; pageLoadWaitTimedOut: boolean }[] = [];
+
+      for (const action of actionsForAct) {
+        const urlBeforeAct = page.url();
+
+        // Stagehand 的 act() 不支持某些 Playwright 特有的方法（例如 check/uncheck），
+        // 在仅用于“断言回放”的场景下，将这些方法安全地降级为 click，
+        // 确保最终页面状态一致，同时不影响真正测试执行时的 Playwright 回放能力。
+        const actionForStagehand: ActionJson = { ...action };
+        const methodLower = (actionForStagehand.method || '').toLowerCase();
+        if (methodLower === 'check' || methodLower === 'uncheck') {
+          actionForStagehand.method = 'click';
+        }
+
+        const actResult: any = await (stagehand as any).act(actionForStagehand);
+        if (actResult && typeof actResult === 'object' && actResult.success === false) {
+          const msg = actResult.message || actResult.error || '操作执行失败';
+          console.error(chalk.red(`[记录断言] 回放操作失败: ${msg}`));
+          throw new Error(`回放操作失败: ${msg}`);
+        }
+
+        // 若本次操作触发了 URL 变化，则等待页面加载完成后再继续下一步，
+        // 避免因为立即执行下一条而导致元素尚未渲染完成、找不到元素。
+        try {
+          const waitInfo = await waitForPageLoadIfUrlChanged(
+            page as any,
+            urlBeforeAct,
+            (...args: any[]) => console.log(chalk.gray('[记录断言 wait]'), ...args),
+            10000
+          );
+          perActionWait.push({
+            pageLoadWaitAttempted: waitInfo.attempted,
+            pageLoadWaitTimedOut: waitInfo.timedOut
+          });
+        } catch (e: any) {
+          perActionWait.push({ pageLoadWaitAttempted: true, pageLoadWaitTimedOut: true });
+          console.warn(
+            chalk.yellow(
+              `[记录断言] 等待页面加载时出错，将继续后续操作: ${e?.message || String(e)}`
+            )
+          );
+        }
+      }
+
+      console.log(chalk.cyan('[记录断言] 操作回放完成，开始根据 expectedResult 做 AI 断言...'));
+      const { log, plan } = await verifyExpectedResultWithAI({
+        expectedResult,
+        stagehand,
+        page,
+        llmClient,
+        existingPlan: undefined
+      });
+
+      const matched = checkResultMatch(expectedResult, log);
+      if (!matched) {
+        console.error(
+          chalk.red(
+            `[记录断言] 预期结果不匹配，将不会把录制的 actions 写入 result.steps。\n  预期: ${expectedResult}\n  实际: ${log}`
+          )
+        );
+        return;
+      }
+
+      console.log(
+        chalk.green(
+          '[记录断言] 预期结果匹配，已将当前录制视为“有效用例”，接下来写入 data JSON 中的 result.steps。'
+        )
+      );
+
+      await this.writeRecordedStepsToDataFile(
+        data,
+        idx,
+        actionsForAct,
+        { log, plan },
+        perActionWait
+      );
+    } finally {
+      try {
+        await stagehand.close();
+      } catch {
+        // 忽略关闭异常
+      }
+    }
+  }
+
+  /**
+   * 将录制得到的 actions 按「每个 action 一个 step」写入 result.steps，
+   * 每个 step 单独带 pageLoadWaitAttempted / pageLoadWaitTimedOut，并持久化到 data JSON。
+   */
+  private async writeRecordedStepsToDataFile(
+    data: Awaited<ReturnType<typeof loadDataFile>>,
+    testCaseIndex: number,
+    actionsForAct: ActionJson[],
+    assertionResult: { log: string; plan?: AssertionPlan | undefined },
+    perActionWait: { pageLoadWaitAttempted: boolean; pageLoadWaitTimedOut: boolean }[]
+  ): Promise<void> {
+    const nowIso = new Date().toISOString();
+    const prevResult: TestResultJson | undefined = data.testCases[testCaseIndex].result;
+
+    const steps: ActResultJson[] = actionsForAct.map((action, i) => {
+      const wait = perActionWait[i];
+      return {
+        success: true,
+        message: '',
+        actionDescription: action.description || '录制操作',
+        actions: [action],
+        pageLoadWaitAttempted: wait?.pageLoadWaitAttempted ?? false,
+        pageLoadWaitTimedOut: wait?.pageLoadWaitTimedOut ?? false
+      };
+    });
+
+    const newResult: TestResultJson = {
+      status: 'passed',
+      steps,
+      actualResult: assertionResult.log,
+      error: null,
+      startTime: prevResult?.startTime || nowIso,
+      endTime: nowIso,
+      duration: prevResult?.duration ?? 0,
+      assertionPlan: assertionResult.plan ?? prevResult?.assertionPlan,
+      tracePath: prevResult?.tracePath,
+      ...(prevResult?.log ? { log: prevResult.log } : {})
+    };
+
+    // 将 result.steps 里的 actionDescription 同步到用例的 steps（JSON 的测试步骤文案）
+    const stepsTexts = steps.map(s => s.actionDescription);
+
+    data.testCases[testCaseIndex] = {
+      ...data.testCases[testCaseIndex],
+      steps: stepsTexts,
+      result: newResult
+    };
+
+    await saveDataFile(this.dataPath, data);
+    console.log(
+      chalk.green(
+        `[记录断言] 已将录制的 ${steps.length} 个操作写入 ${this.dataPath} 中用例 ${data.testCases[testCaseIndex].id} 的 result.steps，并同步到 steps 文案。`
+      )
+    );
   }
 
   /**

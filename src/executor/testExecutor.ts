@@ -262,8 +262,17 @@ export class TestExecutor {
         }
       }
 
-      for (let i = 0; i < testCase.steps.length; i++) {
-        const step = testCase.steps[i];
+      // 有 result.steps（录制步骤）时，仅按录制步骤回放，不再用 steps 文案重新执行
+      const stepCount =
+        (historicalSteps && historicalSteps.length > 0)
+          ? historicalSteps.length
+          : (testCase.steps.length > 0 ? testCase.steps.length : 0);
+
+      for (let i = 0; i < stepCount; i++) {
+        const step =
+          (historicalSteps?.[i] as any)?.actionDescription ??
+          testCase.steps[i] ??
+          `录制步骤 ${i + 1}`;
         const stepResult: StepResult = {
           stepNumber: i + 1,
           description: step,
@@ -368,7 +377,8 @@ export class TestExecutor {
             const waitInfo = await waitForPageLoadIfUrlChanged(
               this.getPwPage() ?? this.page,
               urlBeforeAct,
-              this.log.bind(this)
+              this.log.bind(this),
+              3000
             );
             stepWaitAttempted = waitInfo.attempted;
             stepWaitTimedOut = waitInfo.timedOut;

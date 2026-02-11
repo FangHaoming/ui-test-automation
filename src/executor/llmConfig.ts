@@ -65,8 +65,8 @@ export function checkApiKeys(): void {
 }
 
 export interface BuildStagehandConfigOptions {
-  headless: boolean;
-  debug: boolean;
+  headless?: boolean;
+  debug?: boolean;
 }
 
 export interface BuildStagehandConfigResult {

@@ -11,9 +11,14 @@ export type LogFn = (...args: any[]) => void;
  * 返回本次是否尝试等待以及是否发生超时。
  */
 export async function waitForPageLoadIfUrlChanged(
-  pageForWait: { url: () => string; waitForLoadState: (state: string) => Promise<void>; waitForTimeout: (ms: number) => Promise<void> } | null,
+  pageForWait: {
+    url: () => string;
+    waitForLoadState: (state: string, options?: { timeout?: number }) => Promise<void>;
+    waitForTimeout: (ms: number) => Promise<void>;
+  } | null,
   urlBeforeAct: string,
-  log: LogFn
+  log: LogFn,
+  timeoutMs: number = 3_000
 ): Promise<{ attempted: boolean; timedOut: boolean }> {
   if (!pageForWait) {
     log(chalk.gray(`    [调试] waitForPageLoadIfUrlChanged: page 为空，跳过`));
@@ -23,9 +28,9 @@ export async function waitForPageLoadIfUrlChanged(
   let attempted = false;
   let timedOut = false;
   try {
-    log(chalk.gray(`    [调试] 等待页面加载完成...`));
+    log(chalk.gray(`    [调试] 等待页面加载完成（最多 ${timeoutMs}ms）...`));
     attempted = true;
-    await pageForWait.waitForLoadState('networkidle');
+    await pageForWait.waitForLoadState('networkidle', { timeout: timeoutMs });
   } catch (_e) {
     log(chalk.yellow(`    [等待加载] 等待 networkidle 超时，继续执行`));
     timedOut = true;
