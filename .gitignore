@@ -11,4 +11,5 @@ node_modules/
 dist/
 /data
 /excel
+TODO.md
 *.tsbuildinfo
