@@ -35,6 +35,7 @@ export class NetworkInterceptor {
   private isIntercepting: boolean = false;
   private requestListener?: (request: any) => void;
   private responseListener?: (response: any) => void;
+  private routeHandler?: (route: any) => Promise<void> | void;
 
   constructor(page: any) {
     this.page = page;
@@ -89,7 +90,7 @@ export class NetworkInterceptor {
 
     // 使用 Playwright 的 page.on('request' | 'response') 记录网络请求与响应，
     // 根据已配置的 endpoints 过滤后写入 recordedRequests / recordedResponses。
-    // 这里只做“记录”，不对请求进行拦截或 mock（recordOnly 语义）。
+    // 若 endpoint.recordOnly !== true 且提供了 mockResponse，则通过 route.fulfill 做 mock。
     try {
       if (!this.page || typeof this.page.on !== 'function') {
         console.warn('[网络拦截] 当前 page 不支持事件订阅，无法记录请求/响应');
@@ -155,6 +156,49 @@ export class NetworkInterceptor {
 
       this.page.on('request', this.requestListener);
       this.page.on('response', this.responseListener);
+
+      // 若存在需要 mock 的 endpoint，使用 Playwright route 拦截并返回本地响应
+      const hasMockEndpoints = this.endpoints.some(
+        ep => ep.mockResponse !== undefined && ep.recordOnly !== true
+      );
+      if (hasMockEndpoints && typeof this.page.route === 'function') {
+        this.routeHandler = async (route: any) => {
+          try {
+            const request = route.request?.();
+            const url = String(request?.url?.() || request?.url || '');
+            const method = String(request?.method?.() || request?.method || 'GET');
+            const endpoint = this.findMatchingEndpoint(url, method);
+            if (endpoint && endpoint.mockResponse && endpoint.recordOnly !== true) {
+              const mock = endpoint.mockResponse;
+              const status = typeof mock.status === 'number' ? mock.status : 200;
+              const headers: Record<string, string> = {
+                ...(mock.headers || {})
+              };
+              let bodyText = '';
+              if (mock.body !== undefined) {
+                bodyText = typeof mock.body === 'string' ? mock.body : JSON.stringify(mock.body);
+                if (!headers['content-type'] && !headers['Content-Type']) {
+                  headers['content-type'] = 'application/json;charset=UTF-8';
+                }
+              }
+              try {
+                await route.fulfill({ status, headers, body: bodyText });
+                return;
+              } catch {
+                // 如果 fulfill 失败，退回继续请求
+              }
+            }
+          } catch {
+            // 忽略处理中的错误，退回走正常网络
+          }
+          try {
+            await route.continue();
+          } catch {
+            // ignore
+          }
+        };
+        await this.page.route('**/*', this.routeHandler);
+      }
     } catch (error) {
       console.warn('[网络拦截] 订阅 Playwright 网络事件失败:', error);
     }
@@ -196,7 +240,7 @@ export class NetworkInterceptor {
     }
     this.cdpSession = null;
 
-    // 解除 Playwright 事件监听，避免重复记录
+    // 解除 Playwright 事件监听与 route，避免重复记录或拦截
     try {
       if (this.page && typeof this.page.off === 'function') {
         if (this.requestListener) {
@@ -206,12 +250,20 @@ export class NetworkInterceptor {
           this.page.off('response', this.responseListener);
         }
       }
+      if (this.page && typeof this.page.unroute === 'function' && this.routeHandler) {
+        try {
+          await this.page.unroute('**/*', this.routeHandler);
+        } catch {
+          // ignore
+        }
+      }
     } catch {
       // 忽略解除监听时的错误
     }
 
     this.requestListener = undefined;
     this.responseListener = undefined;
+    this.routeHandler = undefined;
   }
 
   /**

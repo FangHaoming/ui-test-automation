@@ -60,6 +60,8 @@ interface CommandLineOptions {
   onlyApi: boolean;
   /** 在执行模式下同时记录 API 请求并写入 data JSON（生成/更新 apiRecords） */
   recordApi: boolean;
+  /** 在执行模式下，使用 data JSON 中的 apiRecords 作为 mock 响应，拦截并返回本地响应 */
+  mockApi: boolean;
 }
 
 /**
@@ -89,7 +91,8 @@ async function main(): Promise<void> {
     onlyFailed: false,
     deleteCase: null,
     onlyApi: false,
-    recordApi: false
+    recordApi: false,
+    mockApi: false
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -146,6 +149,9 @@ async function main(): Promise<void> {
         break;
       case '--record-api':
         options.recordApi = true;
+        break;
+      case '--mock-api':
+        options.mockApi = true;
         break;
       case '--api-config':
       case '--api':
@@ -441,11 +447,50 @@ async function main(): Promise<void> {
       const batch = testCases.slice(i, i + maxConcurrency);
       const batchResultsArrays = await Promise.all(
         batch.map(async testCase => {
-        // 为当前用例筛选对应的 API endpoint（用于网络记录与 schema 生成）
-        const endpointsForCase: ApiEndpoint[] =
-          Array.isArray(apiEndpoints) && apiEndpoints.length > 0
-            ? apiEndpoints.filter((ep: any) => !ep.testCaseId || ep.testCaseId === testCase.id)
-            : [];
+          // 为当前用例筛选对应的 API endpoint（用于网络记录与 schema 生成）
+          let endpointsForCase: ApiEndpoint[] =
+            Array.isArray(apiEndpoints) && apiEndpoints.length > 0
+              ? apiEndpoints.filter((ep: any) => !ep.testCaseId || ep.testCaseId === testCase.id)
+              : [];
+
+          // 若开启 --mock-api，则基于 data JSON 中的 apiRecords 构造 mock endpoint，
+          // 并注入到当前用例的 endpoints 列表中（用于执行阶段的网络拦截与 mock）
+          if (options.mockApi) {
+            const dataCase = (data.testCases || []).find((c: any) => c.id === testCase.id) as any;
+            const apiRecords = dataCase?.apiRecords as
+              | Record<string, { response?: any }>
+              | undefined;
+            const validateApiUrls = dataCase?.validateApiUrls as string[] | undefined;
+
+            if (apiRecords) {
+              const urlsToMock: string[] =
+                Array.isArray(validateApiUrls) && validateApiUrls.length > 0
+                  ? validateApiUrls
+                  : Object.keys(apiRecords);
+
+              const mockEndpoints: ApiEndpoint[] = [];
+              for (const url of urlsToMock) {
+                const rec = apiRecords[url];
+                if (rec && rec.response) {
+                  mockEndpoints.push({
+                    url,
+                    mockResponse: rec.response,
+                    recordOnly: false,
+                    testCaseId: testCase.id
+                  });
+                }
+              }
+
+              if (mockEndpoints.length > 0) {
+                const nonMock = endpointsForCase.filter(ep =>
+                  !mockEndpoints.some(me => typeof me.url === 'string' && typeof ep.url === 'string'
+                    ? me.url === ep.url && me.testCaseId === ep.testCaseId
+                    : false)
+                );
+                endpointsForCase = [...mockEndpoints, ...nonMock];
+              }
+            }
+          }
 
           const executor = new TestExecutor({
             headless: options.headless,
