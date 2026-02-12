@@ -14,8 +14,8 @@ export function checkApiKeys(): void {
   const useLocalLLM = process.env.USE_LOCAL_LLM === 'true';
 
   if (useLocalLLM) {
-    const localLLMUrl = process.env.LOCAL_LLM_URL || 'http://localhost:3001';
-    const ollamaModel = process.env.OLLAMA_MODEL || 'qwen2.5:3b';
+    const localLLMUrl = process.env.LOCAL_LLM_URL || 'http://localhost:11434/api';
+    const ollamaModel = process.env.OLLAMA_MODEL || process.env.LOCAL_LLM_MODEL || 'qwen2.5:3b';
     console.log(chalk.cyan('✓ 使用本地LLM模式'));
     console.log(chalk.gray(`   本地LLM服务: ${localLLMUrl}`));
     console.log(chalk.gray(`   Ollama模型: ${ollamaModel}`));
@@ -25,6 +25,7 @@ export function checkApiKeys(): void {
     }
     if (localLLMUrl) {
       process.env.OPENAI_BASE_URL = localLLMUrl;
+      process.env.OLLAMA_BASE_URL = localLLMUrl;
     }
     return;
   }
@@ -96,7 +97,7 @@ export function buildStagehandConfig(options: BuildStagehandConfigOptions): Buil
   if (useLocalLLM) {
     try {
       llmClient = new AISdkClient({
-        model: OllamaProvider.languageModel(process.env.OLLAMA_MODEL || 'qwen2.5:3b'),
+        model: OllamaProvider.languageModel(process.env.OLLAMA_MODEL || process.env.LOCAL_LLM_MODEL || 'qwen2.5:3b'),
       });
       stagehandConfig.llmClient = llmClient;
       console.log(chalk.cyan('✓ 已配置Ollama本地LLM客户端'));
@@ -106,7 +107,7 @@ export function buildStagehandConfig(options: BuildStagehandConfigOptions): Buil
       console.error(chalk.yellow('\n请确保:'));
       console.error(chalk.yellow('  1. Ollama服务正在运行: ollama serve'));
       console.error(chalk.yellow('  2. 已下载模型: ollama pull qwen2.5:3b'));
-      console.error(chalk.yellow('  3. 检查 .env 文件中的 OLLAMA_BASE_URL 和 OLLAMA_MODEL 配置'));
+      console.error(chalk.yellow('  3. 检查 .env 中的 LOCAL_LLM_URL / OLLAMA_BASE_URL 和 LOCAL_LLM_MODEL / OLLAMA_MODEL'));
       throw error;
     }
   } else if (hasAnthropic && !hasOpenAI && !hasGoogle) {

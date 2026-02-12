@@ -11,6 +11,10 @@ export interface TestCase {
   steps: string[];
   expectedResult: string;
   description: string;
+  /** 该用例关注的 API URL 列表（来自 Excel「API URL」列），支持换行或分号分隔 */
+  apiUrls?: string[];
+  /** 该用例需要校验的 API URL 列表（来自 Excel「校验API URL」列），支持换行或分号分隔 */
+  validateApiUrls?: string[];
 }
 
 /**
@@ -64,13 +68,18 @@ export async function parseTestCases(filePath: string): Promise<TestCase[]> {
       return String(cell.value);
     };
 
+    const apiUrls = parseUrlList(getCellValue(row.getCell(7)));
+    const validateApiUrls = parseUrlList(getCellValue(row.getCell(8)));
+
     const testCase: TestCase = {
       id: getCellValue(row.getCell(1)) || `TC-${rowNumber - 1}`,
       name: getCellValue(row.getCell(2)),
       url: getCellValue(row.getCell(3)),
       steps: parseSteps(getCellValue(row.getCell(4))),
       expectedResult: getCellValue(row.getCell(5)),
-      description: getCellValue(row.getCell(6))
+      description: getCellValue(row.getCell(6)),
+      ...(apiUrls.length > 0 ? { apiUrls } : {}),
+      ...(validateApiUrls.length > 0 ? { validateApiUrls } : {})
     };
 
     // 只要有测试 ID（第一列）就解析并加入，不要求必须有测试步骤等
@@ -96,6 +105,19 @@ function parseSteps(stepsText: string): string[] {
 }
 
 /**
+ * 解析 URL 列表字符串（支持换行或分号分隔）
+ * @param text - 单元格文本
+ * @returns URL 数组，无有效内容时返回空数组
+ */
+function parseUrlList(text: string): string[] {
+  if (!text || !String(text).trim()) return [];
+  return String(text)
+    .split(/[\n;]/)
+    .map(url => url.trim())
+    .filter(url => url.length > 0);
+}
+
+/**
  * 创建示例Excel模板
  * @param filePath - 保存路径
  */
@@ -111,9 +133,8 @@ export async function createTemplate(filePath: string): Promise<void> {
     { header: '测试步骤', key: 'steps', width: 60 },
     { header: '预期结果', key: 'expectedResult', width: 50 },
     { header: '备注', key: 'description', width: 30 },
-    { header: 'API URL', key: 'apiUrl', width: 50 },
-    { header: 'API Request', key: 'apiRequest', width: 80 },
-    { header: 'API Response', key: 'apiResponse', width: 80 }
+    { header: '记录API URL', key: 'apiUrl', width: 50 },
+    { header: '校验API URL', key: 'validateApiUrl', width: 50 }
   ];
   
   // 设置表头样式
@@ -264,8 +285,7 @@ export async function createTemplateWithApiConfig(filePath: string): Promise<voi
     { header: '预期结果', key: 'expectedResult', width: 50 },
     { header: '备注', key: 'description', width: 30 },
     { header: 'API URL', key: 'apiUrl', width: 50 },
-    { header: 'API Request', key: 'apiRequest', width: 80 },
-    { header: 'API Response', key: 'apiResponse', width: 80 }
+    { header: '校验API URL', key: 'validateApiUrl', width: 50 }
   ];
   
   // 设置表头样式
@@ -276,7 +296,7 @@ export async function createTemplateWithApiConfig(filePath: string): Promise<voi
     fgColor: { argb: 'FFE0E0E0' }
   };
   
-  // 添加示例数据（一个测试用例对应多个API）
+  // 添加示例数据（一个测试用例对应多个API；校验API URL 为执行时要校验的 API 子集）
   testCaseSheet.addRow({
     id: 'TC-001',
     name: '登录功能测试',
@@ -285,8 +305,7 @@ export async function createTemplateWithApiConfig(filePath: string): Promise<voi
     expectedResult: '成功跳转到首页，显示欢迎信息',
     description: '验证正常登录流程',
     apiUrl: '/api/login\n/api/user',
-    apiRequest: '（记录操作时自动填充Zod校验规则）',
-    apiResponse: '（记录操作时自动填充）'
+    validateApiUrl: '/api/login'
   });
   
   testCaseSheet.addRow({
@@ -297,13 +316,11 @@ export async function createTemplateWithApiConfig(filePath: string): Promise<voi
     expectedResult: '显示搜索结果列表，包含相关结果',
     description: '验证搜索功能',
     apiUrl: '/api/search',
-    apiRequest: '（记录操作时自动填充Zod校验规则）',
-    apiResponse: '（记录操作时自动填充）'
+    validateApiUrl: '/api/search'
   });
   
   await workbook.xlsx.writeFile(filePath);
   console.log(`模板文件已创建: ${filePath}`);
   console.log('提示：API URL列支持多个URL，用换行或分号分隔');
-  console.log('     API Request列：记录操作时自动填充Zod校验规则（作为预期结果）');
-  console.log('     API Response列：记录操作时自动填充真实的响应数据（仅记录，不校验）');
+  console.log('     校验API URL列：执行时要校验的 API 列表（换行或分号分隔）；不填则对所有有 requestSchema 的 URL 校验');
 }

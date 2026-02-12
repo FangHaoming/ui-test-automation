@@ -322,6 +322,7 @@ export class TestExecutor {
 
             if (pwPage) {
               const observeInstruction = /^(find|查找|定位|get)./i.test(step.trim()) ? step : `find the element to ${step}`;
+              this.log(chalk.gray(`    [observe] 传入 stagehand.observe 的字符串: "${observeInstruction}"`));
               const observedActions = await this.stagehand.observe(observeInstruction);
               if (observedActions.length > 0) {
                 this.log(chalk.blue(`    [Observe] 找到 ${observedActions.length} 个操作，使用 Playwright 执行`));

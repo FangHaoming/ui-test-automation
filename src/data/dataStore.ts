@@ -6,7 +6,7 @@ import { join, basename, extname, resolve } from 'path';
 import { readFile, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { ensureDir } from '../utils/fsUtils.js';
-import { parseTestCases, getTestCaseApiMapping } from './excelParser.js';
+import { parseTestCases } from './excelParser.js';
 import type { TestCase } from './excelParser.js';
 import type { TestResult, TestStatistics } from '../executor/testExecutor.js';
 import type { NetworkRequest, NetworkResponse } from '../utils/networkInterceptor.js';
@@ -110,7 +110,7 @@ export async function ensureDataDir(): Promise<string> {
 }
 
 function testCaseToJson(tc: TestCase): TestCaseJson {
-  return {
+  const json: TestCaseJson = {
     id: tc.id,
     name: tc.name,
     url: tc.url,
@@ -118,6 +118,9 @@ function testCaseToJson(tc: TestCase): TestCaseJson {
     expectedResult: tc.expectedResult,
     description: tc.description
   };
+  if (tc.apiUrls && tc.apiUrls.length > 0) json.apiUrls = tc.apiUrls;
+  if (tc.validateApiUrls && tc.validateApiUrls.length > 0) json.validateApiUrls = tc.validateApiUrls;
+  return json;
 }
 
 /**
@@ -134,16 +137,11 @@ export async function loadTestCasesFromExcelAndSave(excelPath: string): Promise<
   await ensureDataDir();
 
   const sourceFile = basename(excelPath);
-  const mappingMap = await getTestCaseApiMapping(excelPath);
 
-  // 先根据 Excel 解析得到基础用例，并把「API URL」列写进各自的 testCase.apiUrls
+  // 解析结果已包含 apiUrls、validateApiUrls（来自 Excel 的「API URL」「校验API URL」列）
   let data: DataFile = {
     sourceFile,
-    testCases: testCases.map(tc => {
-      const base = testCaseToJson(tc);
-      const urls = mappingMap.get(tc.id);
-      return urls && urls.length > 0 ? { ...base, apiUrls: urls } : base;
-    })
+    testCases
   };
 
   // 若已有 data 文件，保留每个用例的 result、apiRecords 等历史信息
@@ -181,7 +179,6 @@ export async function mergeExcelToDataFile(
   dataPathOrUndefined?: string
 ): Promise<{ mergedCount: number; skippedCount: number; dataPath: string }> {
   const testCases = await parseTestCases(excelPath);
-  const mappingMap = await getTestCaseApiMapping(excelPath);
   const dataPath = dataPathOrUndefined
     ? resolve(process.cwd(), dataPathOrUndefined)
     : getDataPath(excelPath);
@@ -206,13 +203,7 @@ export async function mergeExcelToDataFile(
       continue;
     }
     data.testCases = data.testCases || [];
-    const base = testCaseToJson(tc);
-    const urls = mappingMap.get(tc.id);
-    data.testCases.push(
-      urls && urls.length > 0
-        ? { ...base, apiUrls: urls }
-        : base
-    );
+    data.testCases.push(tc);
     existingIds.add(tc.id);
     mergedCount += 1;
   }

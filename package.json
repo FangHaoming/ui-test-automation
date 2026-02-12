@@ -9,10 +9,11 @@
     "start": "tsx src/index.ts",
     "start:compiled": "node dist/index.js",
     "test": "tsx src/index.ts",
+    "create:template": "tsx src/index.ts --template excel/test-cases-template.xlsx",
     "execute:excel": "tsx src/index.ts --excel excel/test-cases-template.xlsx --headless false --case-id TC-001",
     "execute:json:tc-003": "tsx src/index.ts --data data/test-cases-template.json --headless false --case-id TC-003",
     "execute:onlyapi:tc-003": "yarn execute:json:tc-003 --only-api",
-    "record:api:tc-003": "yarn execute:json:tc-003 --record-api --case-id TC-003",
+    "record:api:tc-003": "yarn execute:json:tc-003 --record-api",
     "mock-validate:api:tc-003": "yarn execute:json:tc-003 --only-api --mock-api",
     "mock:api:tc-003": "yarn execute:json:tc-003 --mock-api",
     "execute:json": "tsx src/index.ts --data data/test-cases-template.json --headless false",
@@ -25,7 +26,8 @@
     "dev": "tsx watch src/index.ts",
     "llm:setup": "bash scripts/setup-ollama.sh",
     "debug": "DEBUG=true tsx src/index.ts --interactive --debug --headless false",
-    "stop-recording": "mkdir -p records && touch records/.stop-recording"
+    "stop-recording": "mkdir -p records && touch records/.stop-recording",
+    "verify-openai-connection": "tsx scripts/verify-openai-connection.ts"
   },
   "keywords": [
     "ui-testing",
